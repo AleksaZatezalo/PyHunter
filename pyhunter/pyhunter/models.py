@@ -33,9 +33,10 @@ class Finding:
     source: Optional[str] = None
 
     # LLM enrichment (populated by skills)
-    exploitable:           Optional[bool] = None
-    false_positive_reason: Optional[str]  = None
-    analysis:              Optional[str]  = None  # exploitability rationale
+    exploitable:           Optional[bool]  = None
+    confidence:            Optional[float] = None  # exploitability confidence [0.0–1.0]
+    false_positive_reason: Optional[str]   = None
+    analysis:              Optional[str]   = None  # exploitability rationale
     explanation:           Optional[str]  = None  # developer-friendly description
     poc:                   Optional[str]  = None  # minimal payload
     demo:                  Optional[str]  = None  # runnable exploit script
@@ -54,6 +55,7 @@ class Finding:
             "sink":                  self.sink,
             "source":                self.source,
             "exploitable":           self.exploitable,
+            "confidence":            self.confidence,
             "false_positive_reason": self.false_positive_reason,
             "analysis":              self.analysis,
             "explanation":           self.explanation,

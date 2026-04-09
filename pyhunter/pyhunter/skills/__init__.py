@@ -1,14 +1,16 @@
-"""Claude API wrapper and prompt loader."""
+"""Claude API wrapper with disk-based response caching."""
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from typing import Optional
 
 import anthropic
 
-_MODEL   = "claude-opus-4-5"
-_PROMPTS = Path(__file__).parent / "prompts"
+_MODEL     = "claude-opus-4-5"
+_PROMPTS   = Path(__file__).parent / "prompts"
+_CACHE_DIR = Path.home() / ".cache" / "pyhunter"
 
 _sync_client:  Optional[anthropic.Anthropic]      = None
 _async_client: Optional[anthropic.AsyncAnthropic] = None
@@ -40,11 +42,26 @@ def load_prompt(name: str) -> str:
     return (_PROMPTS / f"{name}.md").read_text()
 
 
+def _cache_key(system: str, user: str) -> str:
+    digest = hashlib.sha256(f"{system}\x00{user}".encode()).hexdigest()
+    return digest[:24]
+
+
 async def async_call_claude(system: str, user: str, max_tokens: int = 1024) -> str:
+    key        = _cache_key(system, user)
+    cache_path = _CACHE_DIR / f"{key}.txt"
+
+    if cache_path.exists():
+        return cache_path.read_text()
+
     message = await _async().messages.create(
         model=_MODEL,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
     )
-    return message.content[0].text.strip()
+    text = message.content[0].text.strip()
+
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(text)
+    return text

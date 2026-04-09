@@ -8,6 +8,10 @@ from pyhunter.rules.path_traversal         import PathTraversalRule
 from pyhunter.rules.ssti                   import SSTIRule
 from pyhunter.rules.unsafe_subprocess      import UnsafeSubprocessRule
 from pyhunter.rules.pickle_socket          import PickleOverSocketRule
+from pyhunter.rules.dunder_abuse           import DunderAbuseRule
+from pyhunter.rules.import_time_exec       import ImportTimeExecRule
+from pyhunter.rules.build_rce              import BuildInstallRCERule
+from pyhunter.rules.web_flow               import WebInputFlowRule
 
 
 def all_rules():
@@ -19,4 +23,8 @@ def all_rules():
         SSTIRule(),
         UnsafeSubprocessRule(),
         PickleOverSocketRule(),
+        DunderAbuseRule(),
+        ImportTimeExecRule(),
+        BuildInstallRCERule(),
+        WebInputFlowRule(),
     ]

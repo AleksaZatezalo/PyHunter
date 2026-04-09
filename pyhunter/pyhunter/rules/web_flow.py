@@ -141,7 +141,10 @@ class WebInputFlowRule(BaseRule):
 
     def _source_desc(self, expr: ast.expr, tainted: dict) -> str:
         if _is_source(expr):
-            chain = _attr_chain(expr)
+            if isinstance(expr, ast.Call):
+                chain = _attr_chain(expr.func)
+            else:
+                chain = _attr_chain(expr)
             return ".".join(chain) if chain else "user input"
         for n in _names(expr) & tainted.keys():
             return tainted[n]

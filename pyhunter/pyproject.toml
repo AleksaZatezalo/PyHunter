@@ -33,6 +33,9 @@ dev = [
     "flask",        # needed to run examples/vulnerable_app.py
     "pyyaml",
 ]
+github = [
+    "PyGithub>=2.0",
+]
 
 [project.scripts]
 pyhunter = "pyhunter.cli:main"

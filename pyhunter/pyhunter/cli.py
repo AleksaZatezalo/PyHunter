@@ -1,6 +1,7 @@
 """PyHunter CLI."""
 from __future__ import annotations
 
+import json
 import sys
 import time
 from collections import Counter
@@ -39,8 +40,11 @@ def cli():
 @click.option("--no-llm",  is_flag=True, help="AST rules only, skip Claude enrichment.")
 @click.option("--keep-fp", is_flag=True, help="Keep findings marked as false positives.")
 @click.option("--output", "-o", type=click.Path(), default=None,
-              help="Directory to write per-finding markdown reports.")
-def scan(target, no_llm, keep_fp, output):
+              help="Write output here (file for --format json/text, dir for markdown).")
+@click.option("--format", "fmt", type=click.Choice(["json", "text"]), default=None,
+              help="Output format: json (machine-readable) or text (plain).")
+@click.option("--verbose", is_flag=True, help="Show snippet in enrichment progress.")
+def scan(target, no_llm, keep_fp, output, fmt, verbose):
     """Scan TARGET (file or directory) for vulnerabilities."""
     _banner()
     _kv("Target", target)
@@ -49,7 +53,7 @@ def scan(target, no_llm, keep_fp, output):
 
     scanner  = Scanner(use_llm=not no_llm, skip_false_positives=not keep_fp)
     findings = _run_scan(scanner, target, use_llm=not no_llm)
-    _print_results(findings, output)
+    _print_results(findings, output, fmt=fmt)
 
 
 @cli.command()
@@ -215,7 +219,11 @@ def _print_enriched_line(result: Optional[Finding], done: int, total: int) -> No
 
 # ── Full finding detail ───────────────────────────────────────────────────────
 
-def _print_results(findings: List[Finding], output: Optional[str]) -> None:
+def _print_results(findings: List[Finding], output: Optional[str], fmt: Optional[str] = None) -> None:
+    # Write structured output first — always write even when findings list is empty.
+    if output and fmt:
+        _write_structured_output(findings, output, fmt)
+
     if not findings:
         click.echo()
         click.secho("  No confirmed findings.", fg="green")
@@ -228,7 +236,7 @@ def _print_results(findings: List[Finding], output: Optional[str]) -> None:
 
     _print_summary(findings)
 
-    if output:
+    if output and not fmt:
         out = Path(output)
         out.mkdir(parents=True, exist_ok=True)
         for f in findings:
@@ -237,6 +245,26 @@ def _print_results(findings: List[Finding], output: Optional[str]) -> None:
         click.echo()
 
     sys.exit(1)
+
+
+def _write_structured_output(findings: List[Finding], output: str, fmt: str) -> None:
+    out = Path(output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "json":
+        out.write_text(json.dumps([f.to_dict() for f in findings], indent=2))
+        click.echo(f"  JSON report written → {output}")
+    elif fmt == "text":
+        lines: List[str] = []
+        for f in findings:
+            lines.append(f"[{f.severity.value}] {f.rule_id}  {f.file}:{f.line}")
+            lines.append(f"  Sink:    {f.sink or '—'}")
+            lines.append(f"  Source:  {f.source or '—'}")
+            if f.snippet:
+                for ln in f.snippet.splitlines():
+                    lines.append(f"  {ln}")
+            lines.append("")
+        out.write_text("\n".join(lines))
+        click.echo(f"  Text report written → {output}")
 
 
 def _print_finding(f: Finding) -> None:

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from pyhunter.config import load_config
 from pyhunter.models import Finding
 from pyhunter.rules.registry import all_rules
 from pyhunter.taint import TaintEngine, TaintFlow
@@ -39,8 +40,10 @@ class Scanner:
         progress_callback:     Optional[Callable[[int, int, Optional[Finding]], None]] = None,
         raw_findings_callback: Optional[Callable[[List[Finding]], None]]     = None,
     ):
-        self.rules                 = all_rules()
-        self.taint                 = TaintEngine()
+        cfg              = load_config()
+        disabled         = set(cfg.get("disabled_rules", []))
+        self.rules       = [r for r in all_rules() if r.rule_id not in disabled]
+        self.taint       = TaintEngine()
         self.use_llm               = use_llm
         self.skip_false_positives  = skip_false_positives
         self.progress_callback     = progress_callback

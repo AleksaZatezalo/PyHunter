@@ -217,7 +217,7 @@ def view():
         tree, lines = _parse(src)
         findings = self.rule.check(tree, lines, "app.py")
         assert any(f.sink == "eval" for f in findings)
-        assert any(f.source == "expr" for f in findings)
+        assert any("request.args" in (f.source or "") for f in findings)
 
     def test_detects_request_form_to_subprocess(self):
         src = """\
