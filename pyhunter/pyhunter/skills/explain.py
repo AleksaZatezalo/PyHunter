@@ -1,32 +1,27 @@
-"""Skill: explain - produce a human-readable vulnerability explanation."""
-
+"""Skill: produce a human-readable vulnerability explanation."""
 from __future__ import annotations
 
 from pyhunter.models import Finding
-from pyhunter.skills import call_claude
+from pyhunter.skills import async_call_claude
 
 _SYSTEM = """\
 You are a security educator writing for developers who are not security specialists.
-Given a vulnerable Python code snippet, explain:
+
+Given a vulnerable code snippet, explain in plain language:
 1. What the vulnerability is
 2. Why it is dangerous
-3. A concrete attack scenario (one sentence)
+3. One concrete attack scenario
 
-Be concise (3-5 sentences total). No markdown headers or bullet points.
+Be concise (3-5 sentences total). No markdown headers. No bullet points.
 """
 
 
-def explain(finding: Finding) -> Finding:
-    """Populate finding.explanation via Claude."""
-    user = f"""\
-Vulnerability type: {finding.rule_id}
-Sink: {finding.sink}
-File: {finding.file}  Line: {finding.line}
-
-Code:
-```python
-{finding.snippet}
-```
-"""
-    finding.explanation = call_claude(_SYSTEM, user, max_tokens=300)
+async def explain(finding: Finding) -> Finding:
+    user = (
+        f"Vulnerability: {finding.rule_id}\n"
+        f"Sink: {finding.sink}\n"
+        f"File: {finding.file}  Line: {finding.line}\n\n"
+        f"```python\n{finding.snippet}\n```"
+    )
+    finding.explanation = await async_call_claude(_SYSTEM, user, max_tokens=300)
     return finding

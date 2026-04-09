@@ -1,132 +1,121 @@
-"""
-PyHunter scanning engine.
-
-Pipeline per file:
-  1. AST rules   → raw Finding list (pattern matches)
-  2. Taint engine → TaintFlow list (source→sink confirmation)
-  3. Merge        → annotate findings with confirmed source info
-  4. LLM skills  → analyze, explain, poc, demo (if use_llm=True)
-"""
-
+"""Scan pipeline: collect files → parse → rules + taint → async LLM enrichment."""
 from __future__ import annotations
 
 import ast
+import asyncio
+import sys
 from pathlib import Path
-from typing import List
+from typing import Callable, List, Optional
 
 from pyhunter.models import Finding
 from pyhunter.rules.registry import all_rules
 from pyhunter.taint import TaintEngine, TaintFlow
-from pyhunter.skills import analyze as _analyze_mod
-from pyhunter.skills import explain as _explain_mod
-from pyhunter.skills import poc as _poc_mod
-from pyhunter.skills import demo as _demo_mod
+from pyhunter.skills.enrich import enrich
+
+# Max concurrent Claude API requests — stays well under rate limits
+_CONCURRENCY = 5
 
 
 class Scanner:
     """
     Orchestrates the full scan pipeline.
 
-    Usage:
-        scanner = Scanner(use_llm=True)
-        findings = scanner.scan("/path/to/project")
+    scan(target) → List[Finding]
+        1. Collect .py files under target
+        2. Parse each file: run rules + taint engine
+        3. Merge taint flows into findings
+        4. Enrich each finding via Claude (async, rate-limited)
+
+    Callbacks:
+        raw_findings_callback(findings)          — called after AST parse, before enrichment
+        progress_callback(completed, total, f)   — called after each enrichment completes;
+                                                   f is the enriched Finding or None if filtered
     """
 
-    def __init__(self, use_llm: bool = True, skip_false_positives: bool = True):
-        self.rules = all_rules()
-        self.taint = TaintEngine()
-        self.use_llm = use_llm
-        self.skip_false_positives = skip_false_positives
-
-    # ── public ────────────────────────────────────────────────────────────────
+    def __init__(
+        self,
+        use_llm:               bool                                          = True,
+        skip_false_positives:  bool                                          = True,
+        progress_callback:     Optional[Callable[[int, int, Optional[Finding]], None]] = None,
+        raw_findings_callback: Optional[Callable[[List[Finding]], None]]     = None,
+    ):
+        self.rules                 = all_rules()
+        self.taint                 = TaintEngine()
+        self.use_llm               = use_llm
+        self.skip_false_positives  = skip_false_positives
+        self.progress_callback     = progress_callback
+        self.raw_findings_callback = raw_findings_callback
 
     def scan(self, target: str) -> List[Finding]:
-        """Scan a file or directory tree. Returns enriched findings."""
-        target_path = Path(target)
-        python_files = self._collect_files(target_path)
-
-        raw_findings: List[Finding] = []
-        for filepath in python_files:
-            raw_findings.extend(self._scan_file(filepath))
-
+        files        = self._collect(Path(target))
+        raw_findings = [f for path in files for f in self._parse(path)]
+        if self.raw_findings_callback:
+            self.raw_findings_callback(raw_findings)
         if not self.use_llm:
             return raw_findings
+        return asyncio.run(self._enrich_all(raw_findings))
 
-        return self._enrich(raw_findings)
+    # ── File collection ───────────────────────────────────────────────────────
 
-    # ── file-level analysis ───────────────────────────────────────────────────
-
-    def _collect_files(self, path: Path) -> List[Path]:
+    def _collect(self, path: Path) -> List[Path]:
         if path.is_file() and path.suffix == ".py":
             return [path]
         return list(path.rglob("*.py"))
 
-    def _scan_file(self, filepath: Path) -> List[Finding]:
+    # ── Per-file parsing ──────────────────────────────────────────────────────
+
+    def _parse(self, filepath: Path) -> List[Finding]:
         try:
-            source = filepath.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(source, filename=str(filepath))
+            source       = filepath.read_text(encoding="utf-8", errors="replace")
+            tree         = ast.parse(source, filename=str(filepath))
             source_lines = source.splitlines()
         except SyntaxError:
             return []
 
-        # AST rules → raw findings
         findings: List[Finding] = []
         for rule in self.rules:
             findings.extend(rule.check(tree, source_lines, str(filepath)))
 
-        # Taint engine → confirmed flows
         flows = self.taint.analyze(tree, source_lines, str(filepath))
-
-        # Merge: annotate findings with taint source where confirmed
         self._merge_taint(findings, flows)
-
         return findings
 
-    def _merge_taint(self, findings: List[Finding], flows: List[TaintFlow]) -> None:
-        """
-        For each finding whose sink matches a confirmed taint flow at the same
-        line, annotate finding.source with the taint origin.
-        """
-        # Index flows by (sink, sink_line)
-        flow_index: dict[tuple[str, int], TaintFlow] = {}
-        for flow in flows:
-            # Normalise sink name to match Finding.sink format
-            key = (flow.sink, flow.sink_line)
-            flow_index[key] = flow
+    # ── Taint merge ───────────────────────────────────────────────────────────
 
+    def _merge_taint(self, findings: List[Finding], flows: List[TaintFlow]) -> None:
+        index = {(f.sink, f.sink_line): f for f in flows}
         for finding in findings:
             if finding.sink is None or finding.source is not None:
                 continue
-            # Try exact match first
-            flow = flow_index.get((finding.sink, finding.line))
+            flow = index.get((finding.sink, finding.line))
+            if flow is None:
+                flow = next(
+                    (f for (s, l), f in index.items()
+                     if s == finding.sink and abs(l - finding.line) <= 5),
+                    None,
+                )
             if flow:
                 finding.source = flow.source_expr
-                finding.extra["taint_vars"] = flow.tainted_vars
-                finding.extra["taint_source_line"] = flow.source_line
-                continue
 
-            # Fuzzy: same file + sink name anywhere nearby (±5 lines)
-            for (sink, line), flow in flow_index.items():
-                if sink == finding.sink and abs(line - finding.line) <= 5:
-                    finding.source = flow.source_expr
-                    finding.extra["taint_vars"] = flow.tainted_vars
-                    break
+    # ── Async LLM enrichment ──────────────────────────────────────────────────
 
-    # ── LLM enrichment ────────────────────────────────────────────────────────
+    async def _enrich_all(self, findings: List[Finding]) -> List[Finding]:
+        total     = len(findings)
+        completed = 0
+        sem       = asyncio.Semaphore(_CONCURRENCY)
 
-    def _enrich(self, findings: List[Finding]) -> List[Finding]:
-        """Run each finding through the four-stage Claude skill pipeline."""
-        enriched: List[Finding] = []
-        for finding in findings:
-            finding = _analyze_mod.analyze(finding)
+        async def enrich_and_track(f: Finding) -> Optional[Finding]:
+            nonlocal completed
+            async with sem:
+                try:
+                    result = await enrich(f, skip_false_positives=self.skip_false_positives)
+                except Exception as exc:
+                    print(f"\n  [!] Enrichment error ({f.id}): {exc}", file=sys.stderr)
+                    result = f  # keep raw finding on API failure
+            completed += 1
+            if self.progress_callback:
+                self.progress_callback(completed, total, result)
+            return result
 
-            if self.skip_false_positives and finding.exploitable is False:
-                continue
-
-            finding = _explain_mod.explain(finding)
-            finding = _poc_mod.poc(finding)
-            finding = _demo_mod.demo(finding)
-
-            enriched.append(finding)
-
-        return enriched
+        results = await asyncio.gather(*[enrich_and_track(f) for f in findings])
+        return [r for r in results if r is not None]

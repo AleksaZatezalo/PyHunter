@@ -1,55 +1,39 @@
-"""Skill: analyze - validate exploitability of a raw finding."""
-
+"""Skill: validate exploitability of a raw finding."""
 from __future__ import annotations
 
 from pyhunter.models import Finding
-from pyhunter.skills import call_claude
+from pyhunter.skills import async_call_claude
 
 _SYSTEM = """\
-You are a senior application security engineer specialising in Python vulnerability analysis.
-Given a code snippet and context, determine whether the vulnerability is actually exploitable
-by an attacker. Consider:
-- Is user input reaching the dangerous sink?
-- Are there any effective sanitisation or validation guards?
-- Is the code reachable from an untrusted entry point?
+You are a security engineer assessing whether a detected code pattern is genuinely exploitable.
 
-Respond ONLY with a JSON object in this exact format (no markdown, no extra text):
-{
-  "exploitable": true|false,
-  "confidence": "high"|"medium"|"low",
-  "reason": "<one sentence>"
-}
+Determine if an attacker can realistically reach this dangerous sink with controlled input.
+Consider: is there a real path from untrusted input? Are there effective guards?
+
+If you are uncertain, treat it as exploitable — fail open for security.
+
+Start your response with EXACTLY one of these prefixes:
+  EXPLOITABLE: <one-sentence reason>
+  FALSE_POSITIVE: <specific reason why no attacker path exists>
+
+Only use FALSE_POSITIVE when you are highly confident no attack path exists.
+Keep your total response under 80 words.
 """
 
 
-def analyze(finding: Finding) -> Finding:
-    """
-    Call Claude to validate whether *finding* is actually exploitable.
-    Mutates and returns the same finding object.
-    """
-    user = f"""\
-Rule: {finding.rule_id}
-File: {finding.file}  Line: {finding.line}
-Sink: {finding.sink}
-Source (if known): {finding.source or "unknown"}
-
-Code snippet:
-```python
-{finding.snippet}
-```
-
-Is this exploitable?
-"""
-    import json
-    raw = call_claude(_SYSTEM, user, max_tokens=256)
-    try:
-        data = json.loads(raw)
-        finding.exploitable = data.get("exploitable", True)
-        if not finding.exploitable:
-            finding.false_positive_reason = data.get("reason", "")
-        finding.extra["analyze_confidence"] = data.get("confidence", "medium")
-    except json.JSONDecodeError:
-        # Fail open - keep as potentially exploitable
+async def analyze(finding: Finding) -> Finding:
+    user = (
+        f"Rule: {finding.rule_id}\n"
+        f"File: {finding.file}  Line: {finding.line}\n"
+        f"Sink: {finding.sink}\n"
+        f"Source: {finding.source or 'unknown'}\n\n"
+        f"```python\n{finding.snippet}\n```"
+    )
+    raw = await async_call_claude(_SYSTEM, user, max_tokens=200)
+    if raw.upper().startswith("FALSE_POSITIVE"):
+        finding.exploitable           = False
+        finding.false_positive_reason = raw[raw.index(":") + 1:].strip() if ":" in raw else raw
+    else:
         finding.exploitable = True
-
+        finding.analysis    = raw[raw.index(":") + 1:].strip() if ":" in raw else raw
     return finding

@@ -1,34 +1,25 @@
-"""
-Rule: Web Input → Sink Flows (FLOW-001)
-
-Tracks user input from HTTP request objects and CLI arguments into dangerous
-sinks within the same function scope, using a linear statement-order walk
-to correctly propagate taint through assignment chains.
-"""
-
+"""Rule: web/CLI user input flowing into dangerous sinks within function scope."""
 from __future__ import annotations
+
 import ast
 from typing import Generator, List, Set
 
 from pyhunter.models import Finding, Severity
 from pyhunter.rules import BaseRule
 
-
-_TAINT_CHAINS: set[tuple[str, ...]] = {
+_TAINT_SOURCES: set[tuple[str, ...]] = {
     ("request", "args"),
     ("request", "form"),
     ("request", "json"),
     ("request", "data"),
     ("request", "files"),
     ("request", "values"),
-    ("request", "get_json"),
-    ("request", "get_data"),
     ("sys", "argv"),
     ("os", "environ"),
 }
 
-_SOURCE_CALLS: set[str] = {"input"}
-_SOURCE_METHODS: set[str] = {"getenv", "get_json", "get_data", "get"}
+_SOURCE_CALLS   = {"input"}
+_SOURCE_METHODS = {"getenv", "get_json", "get_data", "get"}
 
 _SINKS: set[tuple[str | None, str]] = {
     (None,         "eval"),
@@ -45,6 +36,8 @@ _SINKS: set[tuple[str | None, str]] = {
 }
 
 
+# ── Taint helpers ─────────────────────────────────────────────────────────────
+
 def _attr_chain(node: ast.expr) -> tuple[str, ...]:
     parts: list[str] = []
     while isinstance(node, ast.Attribute):
@@ -58,7 +51,7 @@ def _attr_chain(node: ast.expr) -> tuple[str, ...]:
 
 def _is_source(node: ast.expr) -> bool:
     chain = _attr_chain(node)
-    if chain and any(chain[: len(s)] == s for s in _TAINT_CHAINS):
+    if chain and any(chain[: len(s)] == s for s in _TAINT_SOURCES):
         return True
     if isinstance(node, ast.Subscript) and _is_source(node.value):
         return True
@@ -69,12 +62,10 @@ def _is_source(node: ast.expr) -> bool:
         if isinstance(func, ast.Attribute):
             if func.attr in _SOURCE_METHODS and _is_source(func.value):
                 return True
-            if _is_source(func):
-                return True
     return False
 
 
-def _names_in(node: ast.expr) -> Set[str]:
+def _names(node: ast.expr) -> Set[str]:
     return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
 
 
@@ -94,15 +85,17 @@ def _walk_stmts(stmts: list[ast.stmt]) -> Generator[ast.stmt, None, None]:
                 yield child
 
 
+# ── Rule ──────────────────────────────────────────────────────────────────────
+
 class WebInputFlowRule(BaseRule):
-    rule_id = "FLOW-WEB"
-    description = "Tracks HTTP/CLI user input flowing into dangerous sinks within function scope."
+    rule_id     = "FLOW-WEB"
+    description = "Web/CLI user input flowing into a dangerous sink"
 
     def check(self, tree: ast.AST, source_lines: List[str], filepath: str) -> List[Finding]:
-        findings: List[Finding] = []
-        for func in ast.walk(tree):
-            if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                findings.extend(self._check_function(func, source_lines, filepath))
+        findings = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                findings.extend(self._check_function(node, source_lines, filepath))
         return findings
 
     def _check_function(
@@ -113,55 +106,48 @@ class WebInputFlowRule(BaseRule):
     ) -> List[Finding]:
         tainted: dict[str, str] = {}   # name → source description
         findings: List[Finding] = []
-        counter = 0
 
         for stmt in _walk_stmts(func.body):
-            rhs = self._rhs(stmt)
-            if rhs is not None and self._expr_tainted(rhs, tainted):
-                for target in self._targets(stmt):
-                    tainted[target] = self._source_desc(rhs, tainted)
+            rhs = self._rhs_of(stmt)
+            if rhs is not None and self._is_tainted(rhs, tainted):
+                desc = self._source_desc(rhs, tainted)
+                for name in self._assigned_names(stmt):
+                    tainted[name] = desc
 
-            # Check sink calls in this statement
             for call in self._calls_in(stmt):
                 key = _sink_key(call)
                 if key not in _SINKS:
                     continue
-                arg_names = self._call_arg_names(call)
+                arg_names = {n for arg in call.args for n in _names(arg)}
+                arg_names |= {n for kw in call.keywords for n in _names(kw.value)}
                 hit = arg_names & tainted.keys()
                 if hit:
-                    counter += 1
                     module, name = key
-                    sink_str = f"{module}.{name}" if module else name
                     findings.append(Finding(
-                        id=f"PY-FLOW-{counter:03d}",
+                        id=f"{self.rule_id}-{call.lineno:04d}",
                         rule_id=self.rule_id,
                         severity=Severity.CRITICAL,
                         file=filepath,
                         line=call.lineno,
                         snippet=self._snippet(source_lines, call.lineno),
-                        source=", ".join(sorted(hit)),
-                        sink=sink_str,
-                        extra={"tainted_vars": sorted(hit), "function": func.name},
+                        source=", ".join(sorted(tainted[n] for n in hit)),
+                        sink=f"{module}.{name}" if module else name,
                     ))
 
         return findings
 
-    # ── helpers ───────────────────────────────────────────────────────────────
-
-    def _expr_tainted(self, expr: ast.expr, tainted: dict) -> bool:
-        if _is_source(expr):
-            return True
-        return bool(_names_in(expr) & tainted.keys())
+    def _is_tainted(self, expr: ast.expr, tainted: dict) -> bool:
+        return _is_source(expr) or bool(_names(expr) & tainted.keys())
 
     def _source_desc(self, expr: ast.expr, tainted: dict) -> str:
         if _is_source(expr):
             chain = _attr_chain(expr)
             return ".".join(chain) if chain else "user input"
-        for name in _names_in(expr) & tainted.keys():
-            return tainted[name]
+        for n in _names(expr) & tainted.keys():
+            return tainted[n]
         return "user input"
 
-    def _rhs(self, stmt: ast.stmt) -> ast.expr | None:
+    def _rhs_of(self, stmt: ast.stmt) -> ast.expr | None:
         if isinstance(stmt, ast.Assign):
             return stmt.value
         if isinstance(stmt, ast.AnnAssign) and stmt.value:
@@ -170,29 +156,18 @@ class WebInputFlowRule(BaseRule):
             return stmt.value
         return None
 
-    def _targets(self, stmt: ast.stmt) -> list[str]:
-        names: list[str] = []
+    def _assigned_names(self, stmt: ast.stmt) -> list[str]:
         if isinstance(stmt, ast.Assign):
-            for t in stmt.targets:
-                names.extend(n.id for n in ast.walk(t) if isinstance(n, ast.Name))
-        elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
-            names.extend(n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name))
-        return names
+            return [n.id for t in stmt.targets for n in ast.walk(t) if isinstance(n, ast.Name)]
+        if isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+            return [n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name)]
+        return []
 
     def _calls_in(self, stmt: ast.stmt) -> list[ast.Call]:
-        calls: list[ast.Call] = []
         if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-            calls.append(stmt.value)
+            return [stmt.value]
         if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
-            calls.append(stmt.value)
+            return [stmt.value]
         if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Call):
-            calls.append(stmt.value)
-        return calls
-
-    def _call_arg_names(self, call: ast.Call) -> Set[str]:
-        names: Set[str] = set()
-        for arg in call.args:
-            names |= _names_in(arg)
-        for kw in call.keywords:
-            names |= _names_in(kw.value)
-        return names
+            return [stmt.value]
+        return []

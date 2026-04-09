@@ -1,36 +1,35 @@
-"""Skill: demo - generate a self-contained runnable exploit demo script."""
-
+"""Skill: generate a complete runnable exploit demonstration script."""
 from __future__ import annotations
 
 from pyhunter.models import Finding
-from pyhunter.skills import call_claude
+from pyhunter.skills import async_call_claude
 
 _SYSTEM = """\
-You are a security researcher writing self-contained Python demo scripts that prove exploitability.
-Generate a complete, runnable Python script that:
-1. Simulates the vulnerable target (inline, no external deps beyond stdlib)
-2. Demonstrates the exploit
-3. Prints clear output showing successful exploitation
+You are a security researcher writing proof-of-concept exploit scripts for defensive research.
 
-Keep the script under 40 lines. Use only Python stdlib.
-Output ONLY valid Python code with no markdown fences.
+Write a complete, self-contained Python script that proves the vulnerability is exploitable.
+
+ALL of the following requirements must be satisfied — no exceptions:
+1. Reproduce the vulnerable logic inline. Define every function, class, or variable needed.
+2. Provide all setup, inputs, and preconditions to reach the vulnerable code. No missing pieces.
+3. Execute the exploit end-to-end with a concrete, realistic payload.
+4. End with: print("EXPLOITED:", <result>)
+5. Use only Python stdlib — zero external packages.
+6. Every variable must have a real value. No placeholders, no `...`, no `# TODO`.
+7. The script must run with `python script.py` and produce visible output proving exploitation.
+8. If HTTP request context is needed, simulate it with a plain dict or minimal mock object inline.
+
+Output ONLY valid Python source code. No markdown fences. No prose.
 """
 
 
-def demo(finding: Finding) -> Finding:
-    """Populate finding.demo with a runnable Python exploit script."""
-    user = f"""\
-Vulnerability: {finding.rule_id}
-Sink: {finding.sink}
-PoC payload: {finding.poc or "N/A"}
-Explanation: {finding.explanation or "N/A"}
-
-Original vulnerable snippet:
-```python
-{finding.snippet}
-```
-
-Write a self-contained demo script.
-"""
-    finding.demo = call_claude(_SYSTEM, user, max_tokens=600)
+async def demo(finding: Finding) -> Finding:
+    user = (
+        f"Vulnerability: {finding.rule_id}\n"
+        f"Sink: {finding.sink}\n"
+        f"PoC payload: {finding.poc or 'N/A'}\n"
+        f"Explanation: {finding.explanation or 'N/A'}\n\n"
+        f"Original vulnerable snippet:\n```python\n{finding.snippet}\n```"
+    )
+    finding.demo = await async_call_claude(_SYSTEM, user, max_tokens=900)
     return finding

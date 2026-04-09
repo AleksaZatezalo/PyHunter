@@ -1,4 +1,4 @@
-"""Rule: command injection via os.system / subprocess with shell=True."""
+"""Rule: unsafe subprocess calls where the command argument is dynamic."""
 from __future__ import annotations
 
 import ast
@@ -7,11 +7,11 @@ from typing import List
 from pyhunter.models import Finding, Severity
 from pyhunter.rules import BaseRule
 
-_ALWAYS_FLAG = {("os", "system"), ("os", "popen")}
-_SHELL_FLAG   = {
+_SUBPROCESS_CALLS = {
     ("subprocess", "run"),
     ("subprocess", "call"),
     ("subprocess", "check_output"),
+    ("subprocess", "check_call"),
     ("subprocess", "Popen"),
 }
 
@@ -22,18 +22,27 @@ def _attr_pair(call: ast.Call) -> tuple[str, str] | None:
     return None
 
 
-def _has_shell_true(call: ast.Call) -> bool:
-    return any(
-        kw.arg == "shell"
-        and isinstance(kw.value, ast.Constant)
-        and kw.value.value is True
-        for kw in call.keywords
-    )
+def _command_is_dynamic(call: ast.Call) -> bool:
+    """Return True if the command argument (first positional) is not a plain string literal."""
+    if not call.args:
+        return False
+    arg = call.args[0]
+    # Static string literal — safe
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return False
+    # List where every element is a string literal — safe
+    if isinstance(arg, ast.List):
+        return not all(
+            isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            for elt in arg.elts
+        )
+    # Anything else (variable, f-string, join, etc.) — dynamic
+    return True
 
 
-class CommandInjectionRule(BaseRule):
-    rule_id     = "CMD-INJECT"
-    description = "Command injection via shell execution"
+class UnsafeSubprocessRule(BaseRule):
+    rule_id     = "UNSAFE-SUBPROCESS"
+    description = "Subprocess call with a dynamically constructed command"
 
     def check(self, tree: ast.AST, source_lines: List[str], filepath: str) -> List[Finding]:
         findings = []
@@ -41,14 +50,14 @@ class CommandInjectionRule(BaseRule):
             if not isinstance(node, ast.Call):
                 continue
             pair = _attr_pair(node)
-            if pair is None:
+            if pair not in _SUBPROCESS_CALLS:
                 continue
-            if pair not in _ALWAYS_FLAG and not (pair in _SHELL_FLAG and _has_shell_true(node)):
+            if not _command_is_dynamic(node):
                 continue
             findings.append(Finding(
                 id=f"{self.rule_id}-{node.lineno:04d}",
                 rule_id=self.rule_id,
-                severity=Severity.CRITICAL,
+                severity=Severity.HIGH,
                 file=filepath,
                 line=node.lineno,
                 snippet=self._snippet(source_lines, node.lineno),

@@ -1,6 +1,6 @@
-"""Rule: Import-Time Code Execution (malicious logic in __init__.py / module level)."""
-
+"""Rule: dangerous calls executed at import time in __init__.py / setup.py."""
 from __future__ import annotations
+
 import ast
 from pathlib import Path
 from typing import List
@@ -8,48 +8,39 @@ from typing import List
 from pyhunter.models import Finding, Severity
 from pyhunter.rules import BaseRule
 
-# Calls that are suspicious at module top-level (outside any function/class)
-_SUSPICIOUS = {"eval", "exec", "compile", "system", "popen", "Popen"}
+_TARGETS      = {"__init__.py", "setup.py"}
+_DANGER_NAMES = {"eval", "exec", "compile", "system", "popen", "Popen"}
+
+
+def _call_name(call: ast.Call) -> str | None:
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return None
 
 
 class ImportTimeExecRule(BaseRule):
-    rule_id = "RCE-IMPORT"
-    description = "Detects code executed at import time that may run during pip install or import."
+    rule_id     = "RCE-IMPORT"
+    description = "Dangerous code executed at import time"
 
     def check(self, tree: ast.AST, source_lines: List[str], filepath: str) -> List[Finding]:
-        # Only flag __init__.py and setup.py — the highest-risk import-time surfaces
-        name = Path(filepath).name
-        if name not in ("__init__.py", "setup.py"):
+        if Path(filepath).name not in _TARGETS:
             return []
-
-        findings: List[Finding] = []
-        counter = 0
-
-        # Walk only top-level statements (not inside functions or classes)
-        for node in ast.iter_child_nodes(tree):
-            for call in ast.walk(node):
+        findings = []
+        for stmt in ast.iter_child_nodes(tree):
+            for call in ast.walk(stmt):
                 if not isinstance(call, ast.Call):
                     continue
-                func_name = self._func_name(call)
-                if func_name in _SUSPICIOUS:
-                    counter += 1
+                name = _call_name(call)
+                if name in _DANGER_NAMES:
                     findings.append(Finding(
-                        id=f"PY-IMPORT-{counter:03d}",
+                        id=f"{self.rule_id}-{call.lineno:04d}",
                         rule_id=self.rule_id,
                         severity=Severity.HIGH,
                         file=filepath,
                         line=call.lineno,
                         snippet=self._snippet(source_lines, call.lineno),
-                        sink=func_name,
-                        extra={"context": "import-time"},
+                        sink=name,
                     ))
-
         return findings
-
-    @staticmethod
-    def _func_name(node: ast.Call) -> str:
-        if isinstance(node.func, ast.Name):
-            return node.func.id
-        if isinstance(node.func, ast.Attribute):
-            return node.func.attr
-        return ""
