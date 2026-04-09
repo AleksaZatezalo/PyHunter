@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyhunter"
+version = "0.1.0"
+description = "AI-powered Python vulnerability scanner with LLM-validated exploitability"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["security", "vulnerability", "static-analysis", "ast", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Topic :: Security",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "anthropic>=0.25.0",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov",
+    "flask",        # needed to run examples/vulnerable_app.py
+    "pyyaml",
+]
+
+[project.scripts]
+pyhunter = "pyhunter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pyhunter*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
+[tool.coverage.run]
+source = ["pyhunter"]
+omit = ["tests/*", "examples/*"]
