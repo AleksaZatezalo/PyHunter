@@ -27,12 +27,19 @@ _DICT_SOURCES: set[tuple[str, ...]] = {
     ("request", "POST"),
     ("request", "GET"),
     ("request", "query_params"),
+    # Tornado RequestHandler: self.request.arguments / body_arguments
+    ("self", "request", "arguments"),
+    ("self", "request", "body_arguments"),
+    ("self", "request", "query_arguments"),
 }
 
-_DICT_METHODS = {"get_json", "json", "dict", "model_dump"}
+_DICT_METHODS = {"get_json", "json", "dict", "model_dump", "form"}
 
 
 def _is_request_dict(node: ast.expr) -> bool:
+    # Unwrap `await expr` — async frameworks use `form = await request.form()`
+    if isinstance(node, ast.Await):
+        node = node.value
     chain = attr_chain(node)
     if chain and any(chain[: len(s)] == s for s in _DICT_SOURCES):
         return True

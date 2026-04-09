@@ -29,7 +29,16 @@ _STARLETTE: set[tuple[str, ...]] = {
     ("request", "query_params"), ("request", "path_params"),
 }
 
-ALL_CHAINS: set[tuple[str, ...]] = _FLASK | _DJANGO | _STARLETTE
+# Tornado RequestHandler: self.request.body / .arguments / etc.
+_TORNADO: set[tuple[str, ...]] = {
+    ("self", "request", "body"),
+    ("self", "request", "arguments"),
+    ("self", "request", "body_arguments"),
+    ("self", "request", "query_arguments"),
+    ("self", "request", "files"),
+}
+
+ALL_CHAINS: set[tuple[str, ...]] = _FLASK | _DJANGO | _STARLETTE | _TORNADO
 
 # Methods on request/self that return user-controlled data
 SOURCE_METHODS: set[str] = {
@@ -179,6 +188,10 @@ def propagate(
 
     if rhs is None:
         return
+
+    # Unwrap `await expr` — async frameworks (Starlette, FastAPI) use `await request.form()`
+    if isinstance(rhs, ast.Await):
+        rhs = rhs.value
 
     rhs_names = names(rhs)
     if is_source(rhs) or bool(rhs_names & (tainted.keys() | seed)):

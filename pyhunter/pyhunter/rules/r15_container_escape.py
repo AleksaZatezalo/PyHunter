@@ -36,7 +36,7 @@ _CAP_ESCAPE = re.compile(
     re.IGNORECASE,
 )
 
-_DOCKER_SDK_DANGEROUS_KWARGS = {"privileged", "pid_mode", "network_mode", "ipc_mode", "cap_add"}
+_DOCKER_SDK_DANGEROUS_KWARGS = {"privileged", "pid_mode", "network_mode", "ipc_mode", "cap_add", "volumes"}
 
 
 def _str_val(node: ast.expr) -> str:
@@ -137,11 +137,11 @@ class ContainerEscapeRule(BaseRule):
                         sink="subprocess.run(container_escape_flag)",
                     ))
 
-            # Docker SDK: client.containers.run(..., privileged=True, pid_mode="host")
+            # Docker SDK: client.containers.run(..., privileged=True, pid_mode="host", volumes={...})
             elif method in {"run", "create"} and any(
                 kw.arg in _DOCKER_SDK_DANGEROUS_KWARGS and (
                     (isinstance(kw.value, ast.Constant) and kw.value.value not in (False, None, ""))
-                    or isinstance(kw.value, (ast.List, ast.Tuple))
+                    or isinstance(kw.value, (ast.List, ast.Tuple, ast.Dict))
                 )
                 for kw in node.keywords
             ):
@@ -161,8 +161,14 @@ class ContainerEscapeRule(BaseRule):
                 ))
 
             # String constants referencing CAP_SYS_ADMIN etc. (capability abuse)
+            # Check both direct string args and elements within list/tuple args
+            cap_strings: list[str] = []
             for arg in node.args:
-                val = _str_val(arg)
+                if isinstance(arg, (ast.List, ast.Tuple)):
+                    cap_strings.extend(_str_val(elt) for elt in arg.elts)
+                else:
+                    cap_strings.append(_str_val(arg))
+            for val in cap_strings:
                 if _CAP_ESCAPE.search(val) and lineno not in seen:
                     seen.add(lineno)
                     findings.append(Finding(

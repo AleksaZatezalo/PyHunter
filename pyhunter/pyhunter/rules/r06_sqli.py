@@ -100,6 +100,13 @@ class SQLInjectRule(BaseRule):
                                         seen.add(lineno)
                                         findings.append(self._f(lineno, source_lines, filepath, f"queryset.extra({kw.arg}=...)"))
                                         break
+                            elif isinstance(kw.value, ast.Dict):
+                                # extra(select={"col": f"SELECT ..."}) — dict values are raw SQL
+                                for val in kw.value.values:
+                                    if val is not None and _is_dynamic_str(val):
+                                        seen.add(lineno)
+                                        findings.append(self._f(lineno, source_lines, filepath, f"queryset.extra({kw.arg}=...)"))
+                                        break
                             elif _is_dynamic_str(kw.value):
                                 seen.add(lineno)
                                 findings.append(self._f(lineno, source_lines, filepath, f"queryset.extra({kw.arg}=...)"))
