@@ -1,187 +1,40 @@
-# PyHunter (MVP)
+# PyHunter
 
-PyHunter is an experimental security tool that detects and proves exploitable vulnerabilities in Python codebases using a hybrid approach:
+**AI-augmented vulnerability scanner for Python codebases.**
 
-    🔍 Static analysis (AST-based rules)
+PyHunter detects exploitable vulnerabilities using a hybrid pipeline of AST-based static analysis and LLM-powered reasoning. Unlike traditional linters, it doesn't just flag risky patterns — it validates exploitability, generates explanations, and produces working proof-of-concept demonstrations.
 
-    🧠 LLM-powered reasoning (“Claude skills”)
+---
 
-    💣 Automatic Proof-of-Concept (PoC) generation
+## How It Works
 
-    🧪 Self-contained exploit demos
+PyHunter runs each finding through a four-stage reasoning pipeline:
 
-Unlike traditional linters like Bandit, PyHunter doesn’t just flag risky patterns—it attempts to validate exploitability and generate working demonstrations.
-🚀 MVP Goals
+```
+AST Pattern Match → Exploitability Validation → Explanation → PoC + Demo Script
+```
 
-The MVP focuses on:
+Each stage is driven by a modular Claude skill, making the pipeline easy to extend, tune, or replace.
 
-    Detecting high-impact vulnerabilities (especially RCE)
+---
 
-    Reducing false positives via LLM validation
+## Installation
 
-    Generating:
+```bash
+git clone https://github.com/yourname/pyhunter
+cd pyhunter
+pip install -e .
+```
 
-        Clear explanations
+## Usage
 
-        Exploit payloads
+```bash
+pyhunter scan ./target_project
+```
 
-        Runnable demo scripts
+### Example Output
 
-🧠 How It Works
-
-PyHunter uses a hybrid pipeline:
-
-Pattern Match (AST)
-        ↓
-Claude Skill → Validate exploitability
-        ↓
-Claude Skill → Explain vulnerability
-        ↓
-Claude Skill → Generate PoC
-        ↓
-Claude Skill → Generate demo script
-
-Each step is modular and driven by reusable “skills”.
-🧩 Vulnerability Categories (MVP Scope)
-
-PyHunter balances Python-specific attack surfaces with general security issues commonly seen in real-world code.
-🔥 1. Dynamic Code Execution (RCE)
-
-Type: Generic (high impact)
-
-Detects unsafe execution of user-controlled input:
-
-    eval(), exec(), compile()
-
-Example:
-
-eval(user_input)
-
-🖥️ 2. Command Injection
-
-Type: Generic
-
-Detects unsafe shell execution:
-
-    os.system
-
-    subprocess with shell=True
-
-Example:
-
-subprocess.run(f"ls {user_input}", shell=True)
-
-🧪 3. Unsafe Deserialization
-
-Type: Generic (Python-heavy)
-
-Targets:
-
-    pickle
-
-    yaml.load
-
-    dill, jsonpickle
-
-Why it matters:
-Deserialization can lead directly to RCE.
-🧬 4. Python Object Model Abuse (Dunder Escapes)
-
-Type: Python-specific 🔥
-
-Detects dangerous traversal:
-
-    __class__
-
-    __mro__
-
-    __subclasses__()
-
-Used for:
-
-    Sandbox escapes
-
-    Hidden RCE chains
-
-📦 5. Import-Time Code Execution
-
-Type: Python-specific
-
-Python executes code on import.
-
-Detects:
-
-    Malicious logic in __init__.py
-
-    Side effects during module import
-
-🛠️ 6. Build / Install-Time RCE
-
-Type: Python ecosystem-specific 🔥
-
-Targets:
-
-    setup.py
-
-    pyproject.toml
-
-Impact:
-Code execution during:
-
-pip install package
-
-📂 7. Path Traversal & File Abuse
-
-Type: Generic
-
-Detects unsafe file handling:
-
-    User-controlled file paths
-
-    Archive extraction issues (Zip Slip)
-
-🔌 8. Dynamic Imports & Module Injection
-
-Type: Python-specific
-
-Detects:
-
-    __import__
-
-    importlib with user input
-
-    sys.path manipulation
-
-🌐 9. Web Input → Sink Flows
-
-Type: Generic (framework-aware)
-
-Tracks user input from:
-
-    HTTP requests
-
-    CLI arguments
-
-To dangerous sinks:
-
-    eval
-
-    subprocess
-
-    file operations
-
-🎭 10. Decorator-Based Execution
-
-Type: Python-specific (often missed)
-
-Detects execution hidden in decorators:
-
-@run(user_input)
-def handler():
-    pass
-
-🧪 Example Output
-
+```json
 {
   "id": "PY-RCE-001",
   "severity": "CRITICAL",
@@ -193,87 +46,102 @@ def handler():
   "poc": "__import__('os').system('id')",
   "demo": "# runnable exploit script..."
 }
+```
 
-🏗️ Project Structure (Simplified)
+---
 
+## Detection Coverage
+
+PyHunter targets high-impact Python vulnerability classes:
+
+| ID | Category | Examples |
+|----|----------|---------|
+| RCE-001 | Dynamic Code Execution | `eval()`, `exec()`, `compile()` |
+| RCE-002 | Command Injection | `os.system`, `subprocess` with `shell=True` |
+| RCE-003 | Unsafe Deserialization | `pickle`, `yaml.load`, `dill`, `jsonpickle` |
+| RCE-004 | Python Object Model Abuse | `__class__`, `__mro__`, `__subclasses__()` |
+| RCE-005 | Import-Time Execution | Malicious logic in `__init__.py` |
+| RCE-006 | Build/Install-Time RCE | `setup.py`, `pyproject.toml` hooks |
+| PATH-001 | Path Traversal & File Abuse | User-controlled paths, Zip Slip |
+| INJ-001 | Dynamic Imports | `__import__`, `importlib` with user input |
+| FLOW-001 | Web Input → Sink Flows | HTTP/CLI input to `eval`, `subprocess`, file ops |
+| EXEC-001 | Decorator-Based Execution | `@run(user_input)` patterns |
+
+---
+
+## Project Structure
+
+```
 pyhunter/
-├── engine/        # scanning + orchestration
-├── rules/         # AST-based detectors
-├── skills/        # Claude-powered reasoning units
-├── taint/         # (planned) data flow tracking
-├── examples/      # vulnerable samples
-└── scripts/       # GitHub / PyPI scanning
+├── engine/        # Scanning orchestration and pipeline coordination
+├── rules/         # AST-based pattern detectors
+├── skills/        # Claude-powered reasoning modules
+│   ├── analyze/   # Exploitability validation
+│   ├── explain/   # Vulnerability explanation
+│   ├── poc/       # Payload generation
+│   └── demo/      # Runnable exploit script generation
+├── taint/         # (planned) Data flow tracking
+├── examples/      # Vulnerable code samples for testing
+└── scripts/       # GitHub and PyPI scanning utilities
+```
 
-⚙️ Usage (MVP)
+---
 
-git clone https://github.com/yourname/pyhunter
-cd pyhunter
+## Claude Skills
 
-pip install -e .
+Each skill is a focused, reusable reasoning unit:
 
-pyhunter scan ./target_project
+| Skill | Purpose |
+|-------|---------|
+| `analyze/` | Determine whether a pattern is actually exploitable in context |
+| `explain/` | Generate a clear, accurate description of the vulnerability |
+| `poc/` | Produce a targeted, non-destructive exploit payload |
+| `demo/` | Build a self-contained, runnable demonstration script |
 
-🧠 Claude Skills
+Skills reduce false positives by applying LLM reasoning after pattern matching, not instead of it.
 
-Each vulnerability is powered by modular prompts:
+---
 
-    analyze/ → Is it exploitable?
+## Roadmap
 
-    explain/ → Why it matters
+- [ ] Taint tracking engine
+- [ ] GitHub mass scanning integration
+- [ ] PyPI package analysis pipeline
+- [ ] CVE report generation mode
+- [ ] Auto-fix suggestions
+- [ ] CI/CD integration
 
-    poc/ → Generate payload
+---
 
-    demo/ → Create runnable exploit
+## Safety
 
-This allows PyHunter to:
+PyHunter is designed for **defensive security research only**.
 
-    Reduce false positives
+- Payloads are non-destructive and scoped to demonstration
+- No exploit generation targeting production systems
+- Responsible disclosure practices are assumed and encouraged
 
-    Provide actionable findings
+---
 
-    Assist in responsible disclosure
+## Contributing
 
-🔐 Safety Considerations
+Contributions are welcome. Priority areas:
 
-PyHunter is designed for defensive security research only.
+- New vulnerability rules under `rules/`
+- Improved or additional Claude skills
+- Real-world vulnerable samples for `examples/`
+- Taint tracking engine work
 
-    Generates non-destructive payloads only
+Please open an issue before submitting a significant PR.
 
-    Encourages responsible disclosure
+---
 
-    Avoids harmful exploit generation
+## Disclaimer
 
-🧭 Roadmap
+This tool is intended for **educational and defensive security purposes only**. You are responsible for ensuring your use complies with applicable laws and responsible disclosure norms.
 
-    Taint tracking engine
+---
 
-    GitHub mass scanning integration
+## Vision
 
-    PyPI package analysis
-
-    CVE report generation mode
-
-    Auto-fix suggestions
-
-    CI/CD integration
-
-🤝 Contributing
-
-Contributions welcome! Areas of interest:
-
-    New vulnerability rules
-
-    Improved Claude skills
-
-    Test cases & real-world samples
-
-⚠️ Disclaimer
-
-This tool is for educational and defensive security purposes only. Always follow responsible disclosure practices when reporting vulnerabilities.
-💡 Vision
-
-PyHunter aims to evolve into:
-
-    🧠 An AI-assisted security researcher for Python ecosystems
-
-Not just finding bugs—but proving, explaining, and helping fix them.
+PyHunter is built toward a single goal: an AI-assisted security researcher for the Python ecosystem — one that doesn't just find bugs, but proves, explains, and helps fix them.
