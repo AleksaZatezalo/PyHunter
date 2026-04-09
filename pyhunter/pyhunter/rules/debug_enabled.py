@@ -51,7 +51,7 @@ class DebugEnabledRule(BaseRule):
                             ))
 
             # Pattern 2: app.debug = True
-            elif isinstance(node, ast.Assign):
+            if isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Attribute) and target.attr == "debug":
                         if _is_true(node.value):

@@ -10,6 +10,7 @@ from pyhunter.rules import BaseRule
 _TAINT_SOURCES: set[tuple[str, ...]] = {
     ("request", "args"), ("request", "form"), ("request", "json"),
     ("request", "data"), ("request", "values"), ("sys", "argv"),
+    ("request", "GET"), ("request", "POST"),   # Django
     ("os", "environ"),
 }
 _SOURCE_CALLS   = {"input"}

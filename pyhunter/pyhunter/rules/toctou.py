@@ -21,7 +21,7 @@ _CHECK_FUNCS: set[tuple[str, str]] = {
 
 # Use functions that act on a path
 _USE_FUNCS: set[str] = {"open", "remove", "unlink", "rename", "mkdir", "makedirs", "rmdir"}
-_USE_METHODS: set[str] = {"open", "unlink", "rename", "mkdir", "rmdir", "write_text", "read_text"}
+_USE_METHODS: set[str] = {"open", "remove", "unlink", "rename", "mkdir", "rmdir", "write_text", "read_text"}
 
 
 def _attr_chain(node: ast.expr) -> tuple[str, ...]:
