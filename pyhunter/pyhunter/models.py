@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 
 class Severity(str, Enum):
@@ -45,6 +45,7 @@ class Finding:
     extra: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
+
         return {
             "id":                    self.id,
             "rule_id":               self.rule_id,
@@ -118,4 +119,63 @@ class Finding:
         lines.append(self.context or "_Not available._")
         lines.append("")
 
+        return "\n".join(lines)
+
+
+_SEV_RANK = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
+
+
+@dataclass
+class ExploitChain:
+    """A sequence of verified findings chained into a complete end-to-end attack path."""
+
+    id:             str             # "CHAIN-001", "CHAIN-002", …
+    title:          str             # "AUTH-BYPASS + SSTI → CONTAINER-ESCAPE"
+    severity:       Severity        # maximum severity across all steps
+    steps:          List[Finding]   # ordered findings in the attack sequence
+    narrative:      str             # Claude-generated step-by-step attack story
+    prerequisites:  str             # what the attacker needs to start
+    impact:         str             # final attacker capability
+
+    def to_dict(self) -> dict:
+        return {
+            "id":            self.id,
+            "title":         self.title,
+            "severity":      self.severity.value,
+            "steps":         [s.id for s in self.steps],
+            "narrative":     self.narrative,
+            "prerequisites": self.prerequisites,
+            "impact":        self.impact,
+        }
+
+    def to_markdown(self) -> str:
+        lines = [
+            f"# {self.id} — {self.title}",
+            "",
+            f"**Severity:** {self.severity.value}  |  **Steps:** {len(self.steps)}",
+            "",
+            "## Attack Steps",
+            "",
+        ]
+        for i, step in enumerate(self.steps, 1):
+            lines.append(
+                f"{i}. **{step.rule_id}** — "
+                f"`{step.file}:{step.line}` — "
+                f"`{step.sink or '?'}`"
+            )
+        lines += [
+            "",
+            "## Attack Narrative",
+            "",
+            self.narrative,
+            "",
+            "## Prerequisites",
+            "",
+            self.prerequisites,
+            "",
+            "## Impact",
+            "",
+            self.impact,
+            "",
+        ]
         return "\n".join(lines)

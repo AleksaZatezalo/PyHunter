@@ -1,4 +1,4 @@
-"""Scan pipeline: collect files → parse → rules + taint → async LLM enrichment."""
+"""Scan pipeline: collect files → parse → rules + taint → async LLM enrichment → chain analysis."""
 from __future__ import annotations
 
 import ast
@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from pyhunter.config import load_config
-from pyhunter.models import Finding
+from pyhunter.engine.chainer import Chainer
+from pyhunter.models import ExploitChain, Finding
 from pyhunter.rules.registry import all_rules
 from pyhunter.taint import TaintEngine, TaintFlow
 from pyhunter.skills.enrich import enrich
@@ -26,6 +27,9 @@ class Scanner:
         2. Parse each file: run rules + taint engine
         3. Merge taint flows into findings
         4. Enrich each finding via Claude (async, rate-limited)
+        5. Build exploit chains from verified findings (async, Claude-narrated)
+
+    After scan() returns, scanner.chains holds any identified ExploitChain objects.
 
     Callbacks:
         raw_findings_callback(findings)          — called after AST parse, before enrichment
@@ -48,6 +52,7 @@ class Scanner:
         self.skip_false_positives  = skip_false_positives
         self.progress_callback     = progress_callback
         self.raw_findings_callback = raw_findings_callback
+        self.chains: List[ExploitChain] = []
 
     def scan(self, target: str) -> List[Finding]:
         files        = self._collect(Path(target))
@@ -56,7 +61,7 @@ class Scanner:
             self.raw_findings_callback(raw_findings)
         if not self.use_llm:
             return raw_findings
-        return asyncio.run(self._enrich_all(raw_findings))
+        return asyncio.run(self._enrich_and_chain(raw_findings))
 
     # ── File collection ───────────────────────────────────────────────────────
 
@@ -100,7 +105,12 @@ class Scanner:
             if flow:
                 finding.source = flow.source_expr
 
-    # ── Async LLM enrichment ──────────────────────────────────────────────────
+    # ── Async LLM enrichment + chain analysis ────────────────────────────────
+
+    async def _enrich_and_chain(self, findings: List[Finding]) -> List[Finding]:
+        enriched    = await self._enrich_all(findings)
+        self.chains = await Chainer().build(enriched)
+        return enriched
 
     async def _enrich_all(self, findings: List[Finding]) -> List[Finding]:
         total     = len(findings)

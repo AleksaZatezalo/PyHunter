@@ -12,7 +12,7 @@ import click
 
 from pyhunter.engine import Scanner
 from pyhunter.engine.pypi import PyPIScanner
-from pyhunter.models import Finding
+from pyhunter.models import ExploitChain, Finding
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -53,7 +53,7 @@ def scan(target, no_llm, keep_fp, output, fmt, verbose):
 
     scanner  = Scanner(use_llm=not no_llm, skip_false_positives=not keep_fp)
     findings = _run_scan(scanner, target, use_llm=not no_llm)
-    _print_results(findings, output, fmt=fmt)
+    _print_results(findings, output, fmt=fmt, chains=scanner.chains)
 
 
 @cli.command()
@@ -219,10 +219,15 @@ def _print_enriched_line(result: Optional[Finding], done: int, total: int) -> No
 
 # ── Full finding detail ───────────────────────────────────────────────────────
 
-def _print_results(findings: List[Finding], output: Optional[str], fmt: Optional[str] = None) -> None:
+def _print_results(
+    findings: List[Finding],
+    output: Optional[str],
+    fmt: Optional[str] = None,
+    chains: Optional[List[ExploitChain]] = None,
+) -> None:
     # Write structured output first — always write even when findings list is empty.
     if output and fmt:
-        _write_structured_output(findings, output, fmt)
+        _write_structured_output(findings, output, fmt, chains=chains or [])
 
     if not findings:
         click.echo()
@@ -235,23 +240,35 @@ def _print_results(findings: List[Finding], output: Optional[str], fmt: Optional
         _print_finding(f)
 
     _print_summary(findings)
+    _print_chains(chains or [])
 
     if output and not fmt:
         out = Path(output)
         out.mkdir(parents=True, exist_ok=True)
         for f in findings:
             (out / f"{f.id}.md").write_text(f.to_markdown())
+        for c in (chains or []):
+            (out / f"{c.id}.md").write_text(c.to_markdown())
         click.echo(f"  Reports written → {output}/")
         click.echo()
 
     sys.exit(1)
 
 
-def _write_structured_output(findings: List[Finding], output: str, fmt: str) -> None:
+def _write_structured_output(
+    findings: List[Finding],
+    output: str,
+    fmt: str,
+    chains: Optional[List[ExploitChain]] = None,
+) -> None:
     out = Path(output)
     out.parent.mkdir(parents=True, exist_ok=True)
     if fmt == "json":
-        out.write_text(json.dumps([f.to_dict() for f in findings], indent=2))
+        payload = {
+            "findings": [f.to_dict() for f in findings],
+            "chains":   [c.to_dict() for c in (chains or [])],
+        }
+        out.write_text(json.dumps(payload, indent=2))
         click.echo(f"  JSON report written → {output}")
     elif fmt == "text":
         lines: List[str] = []
@@ -263,6 +280,15 @@ def _write_structured_output(findings: List[Finding], output: str, fmt: str) -> 
                 for ln in f.snippet.splitlines():
                     lines.append(f"  {ln}")
             lines.append("")
+        if chains:
+            lines.append("EXPLOIT CHAINS")
+            lines.append("=" * 60)
+            for c in chains:
+                lines.append(f"\n[{c.severity.value}] {c.id} — {c.title}")
+                lines.append(f"  Narrative: {c.narrative}")
+                lines.append(f"  Prerequisites: {c.prerequisites}")
+                lines.append(f"  Impact: {c.impact}")
+                lines.append("")
         out.write_text("\n".join(lines))
         click.echo(f"  Text report written → {output}")
 
@@ -308,6 +334,49 @@ def _print_finding_dict(fd: dict) -> None:
         poc=fd.get("poc"), demo=fd.get("demo"), context=fd.get("context"),
     )
     _print_finding(f)
+
+
+def _print_chains(chains: List[ExploitChain]) -> None:
+    if not chains:
+        return
+    click.echo()
+    _thick_rule()
+    click.secho(
+        f"  EXPLOIT CHAINS — {len(chains)} chain(s) identified",
+        bold=True, fg="bright_red",
+    )
+    _thick_rule()
+    for chain in chains:
+        _print_chain(chain)
+
+
+def _print_chain(chain: ExploitChain) -> None:
+    sev   = chain.severity.value
+    color = _SEV_COLOR.get(sev, "white")
+
+    click.echo()
+    click.secho(
+        f"  [{sev}]  {chain.id}  —  {chain.title}",
+        fg=color, bold=True,
+    )
+    click.echo()
+
+    # Step list
+    click.secho("  ┌─ Attack Steps " + "─" * max(0, _W - 17), dim=True)
+    for i, step in enumerate(chain.steps, 1):
+        scol = _SEV_COLOR.get(step.severity.value, "white")
+        click.echo(
+            f"  │  {i}. "
+            + click.style(f"[{step.severity.value}]", fg=scol)
+            + f"  {step.rule_id:<20}"
+            + click.style(f"  {step.file}:{step.line}", dim=True)
+        )
+    click.secho(f"  └{'─' * _W}", dim=True)
+    click.echo()
+
+    _box("Attack Narrative",  chain.narrative,     fg="bright_white")
+    _box("Prerequisites",     chain.prerequisites)
+    _box("Impact",            chain.impact,        fg="red")
 
 
 def _print_summary(findings: List[Finding]) -> None:

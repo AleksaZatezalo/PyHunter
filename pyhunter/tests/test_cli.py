@@ -11,7 +11,9 @@ from pyhunter.cli import cli
 
 VULN_SRC = """\
 import os
-def run(cmd):
+from flask import request
+def run():
+    cmd = request.args.get("cmd")
     os.system(cmd)
 """
 
@@ -56,9 +58,9 @@ class TestScanCommand:
         ])
         assert out.exists(), f"report not written; output:\n{result.output}"
         data = json.loads(out.read_text())
-        assert isinstance(data, list)
-        assert len(data) >= 1
-        assert data[0]["sink"] == "os.system"
+        assert "findings" in data and "chains" in data
+        assert len(data["findings"]) >= 1
+        assert data["findings"][0]["sink"] == "os.system"
 
     def test_scan_json_output_is_list_on_no_findings(self, runner, safe_file, tmp_path):
         out = tmp_path / "report.json"
@@ -68,7 +70,7 @@ class TestScanCommand:
         ])
         assert out.exists()
         data = json.loads(out.read_text())
-        assert data == []
+        assert data == {"findings": [], "chains": []}
 
     def test_scan_writes_text_output(self, runner, vuln_file, tmp_path):
         out = tmp_path / "report.txt"
@@ -116,4 +118,6 @@ class TestScanCommand:
         )
         assert out_file.exists(), "Output file was not written"
         parsed = json.loads(out_file.read_text())
-        assert isinstance(parsed, list), "Output must be a JSON list"
+        assert "findings" in parsed and "chains" in parsed, (
+            "Output must be a JSON object with 'findings' and 'chains' keys"
+        )
