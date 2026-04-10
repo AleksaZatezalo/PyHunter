@@ -1,17 +1,25 @@
-"""Chain engine: groups verified findings into multi-step exploit chains.
+"""Exploit chain engine — groups confirmed findings into multi-step attack paths.
 
-Each of the 15 rules belongs to an attack phase that maps to a stage in the
-web-app-to-root kill chain.  When confirmed findings span two or more phases,
-the Chainer identifies them as a chainable sequence and asks Claude to write
-the end-to-end attack narrative.
+Design pattern: Chain of Responsibility (structural)
+  Each confirmed finding is assigned to an attack phase. When findings span
+  two or more phases the Chainer treats them as a chain: each phase "enables"
+  the next, and Claude narrates the end-to-end attack story.
 
-Attack phases
-─────────────
-  1  Initial Access / RCE   — SSTI, DESER-RCE, CMD-INJECT, DEBUG-EXPOSED, FILE-UPLOAD-RCE
-  2  Data Exfiltration       — SQL-INJECT, SSRF, XXE, PATH-TRAVERSAL
-  3  Credential Theft        — HARDCODED-SECRET
-  4  Auth / Privilege Bypass — AUTH-BYPASS, MASS-ASSIGN
-  5  Host Privilege Escalation — SUID-RISK, WRITABLE-PATH, CONTAINER-ESCAPE
+Attack phases for the current rule set
+───────────────────────────────────────
+  1  Initial Access    — attacker-controlled input reaches vulnerable code
+                         FLOW-WEB, CMD-INJECT, DESER-RCE, FILE-UPLOAD, PICKLE-NET
+
+  2  Code Execution    — the actual RCE mechanism triggered by that input
+                         RCE-EVAL, EXEC-DECORATOR
+
+  3  Supply Chain      — persistence: code runs at build/install/import time
+                         RCE-BUILD, RCE-IMPORT
+
+Example chains
+  Phase 1 + 2 : FLOW-WEB → RCE-EVAL  (web input reaches eval())
+  Phase 1 + 3 : FILE-UPLOAD → RCE-IMPORT  (uploaded file executed at import)
+  All phases  : CMD-INJECT → RCE-EVAL → RCE-BUILD
 """
 from __future__ import annotations
 
@@ -24,39 +32,28 @@ from pyhunter.skills.chain import chain_skill
 # ── Phase mapping ─────────────────────────────────────────────────────────────
 
 PHASE_MAP: Dict[str, int] = {
-    # Phase 1 — Initial Access / RCE
-    "SSTI":             1,
-    "DESER-RCE":        1,
-    "CMD-INJECT":       1,
-    "DEBUG-EXPOSED":    1,
-    "FILE-UPLOAD-RCE":  1,
-    # Phase 2 — Data Exfiltration / Lateral Movement
-    "SQL-INJECT":       2,
-    "SSRF":             2,
-    "XXE":              2,
-    "PATH-TRAVERSAL":   2,
-    # Phase 3 — Credential Theft
-    "HARDCODED-SECRET": 3,
-    # Phase 4 — Auth / Privilege Bypass within the application
-    "AUTH-BYPASS":      4,
-    "MASS-ASSIGN":      4,
-    # Phase 5 — Host-level Privilege Escalation
-    "SUID-RISK":        5,
-    "WRITABLE-PATH":    5,
-    "CONTAINER-ESCAPE": 5,
+    # Phase 1 — Initial Access
+    "FLOW-WEB":       1,
+    "CMD-INJECT":     1,
+    "DESER-RCE":      1,
+    "FILE-UPLOAD":    1,
+    "PICKLE-NET":     1,
+    # Phase 2 — Code Execution
+    "RCE-EVAL":       2,
+    "EXEC-DECORATOR": 2,
+    # Phase 3 — Supply Chain
+    "RCE-BUILD":      3,
+    "RCE-IMPORT":     3,
 }
 
 PHASE_NAMES: Dict[int, str] = {
-    1: "Initial Access / RCE",
-    2: "Data Exfiltration",
-    3: "Credential Theft",
-    4: "Auth / Privilege Bypass",
-    5: "Host Privilege Escalation",
+    1: "Initial Access",
+    2: "Code Execution",
+    3: "Supply Chain",
 }
 
-# Natural "feeds-into" relationships between phases.
-# The list order controls the attack timeline presented in chains.
-_PHASE_ORDER = [4, 3, 2, 1, 5]   # auth-bypass → cred-theft → exfil → RCE → privesc
+# Attack timeline order: access → execution → persistence
+_PHASE_ORDER = [1, 2, 3]
 
 _SEV_RANK = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
 
@@ -71,7 +68,7 @@ class Chainer:
     """Identifies and narrates exploit chains from a list of confirmed findings."""
 
     async def build(self, findings: List[Finding]) -> List[ExploitChain]:
-        """Return a list of ExploitChain objects (may be empty)."""
+        """Return exploit chains (empty list if no multi-phase findings exist)."""
         exploitable = [f for f in findings if f.exploitable is True]
         if len(exploitable) < 2:
             return []
@@ -93,21 +90,18 @@ class Chainer:
                 chains.append(c)
         return chains
 
-    # ── Candidate building ────────────────────────────────────────────────────
+    # ── Candidate construction ────────────────────────────────────────────────
 
     def _build_candidates(
         self,
         by_phase: Dict[int, List[Finding]],
     ) -> List[List[Finding]]:
         """
-        Build candidate chains.  Returns a list of finding-sequences for Claude
-        to narrate.
+        Return up to 3 candidate chains in priority order (duplicates suppressed).
 
-        Candidates (in priority order, duplicates suppressed):
-          1. Full chain — one best-severity finding per phase, ordered by attack
-             timeline (_PHASE_ORDER).
-          2. RCE → Host Privesc  (phases 1 + 5) — the canonical Docker escape.
-          3. Auth Bypass → Data Exfil  (phases 4 + 2) — unauthenticated dump.
+          1. Full chain — best-severity finding per phase, in attack-timeline order.
+          2. Access → Execution  (phases 1 + 2) — web input reaching RCE.
+          3. Access → Supply Chain  (phases 1 + 3) — uploaded/injected persistence.
         """
         def best(phase: int) -> Finding:
             return max(by_phase[phase], key=_sev)
@@ -127,13 +121,12 @@ class Chainer:
             candidates.append([best(p) for p in covered])
 
         # 1. Full chain across all represented phases
-        full_order = [p for p in _PHASE_ORDER if p in present]
-        add(full_order)
+        add([p for p in _PHASE_ORDER if p in present])
 
-        # 2. RCE → Container / Host Privesc
-        add([1, 5])
+        # 2. Initial Access → Code Execution
+        add([1, 2])
 
-        # 3. Auth bypass → data exfiltration
-        add([4, 2])
+        # 3. Initial Access → Supply Chain
+        add([1, 3])
 
         return candidates[:3]

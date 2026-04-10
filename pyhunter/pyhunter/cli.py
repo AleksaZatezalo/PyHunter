@@ -5,6 +5,7 @@ import json
 import sys
 import time
 from collections import Counter
+from datetime import date
 from pathlib import Path
 from typing import List, Optional
 
@@ -40,9 +41,9 @@ def cli():
 @click.option("--no-llm",  is_flag=True, help="AST rules only, skip Claude enrichment.")
 @click.option("--keep-fp", is_flag=True, help="Keep findings marked as false positives.")
 @click.option("--output", "-o", type=click.Path(), default=None,
-              help="Write output here (file for --format json/text, dir for markdown).")
-@click.option("--format", "fmt", type=click.Choice(["json", "text"]), default=None,
-              help="Output format: json (machine-readable) or text (plain).")
+              help="Write output to this file path (markdown by default; use --format to override).")
+@click.option("--format", "fmt", type=click.Choice(["json", "text", "markdown"]), default=None,
+              help="Output format: markdown (default), json (machine-readable), or text (plain).")
 @click.option("--verbose", is_flag=True, help="Show snippet in enrichment progress.")
 def scan(target, no_llm, keep_fp, output, fmt, verbose):
     """Scan TARGET (file or directory) for vulnerabilities."""
@@ -53,7 +54,7 @@ def scan(target, no_llm, keep_fp, output, fmt, verbose):
 
     scanner  = Scanner(use_llm=not no_llm, skip_false_positives=not keep_fp)
     findings = _run_scan(scanner, target, use_llm=not no_llm)
-    _print_results(findings, output, fmt=fmt, chains=scanner.chains)
+    _print_results(findings, output, fmt=fmt, chains=scanner.chains, target=target)
 
 
 @cli.command()
@@ -224,10 +225,14 @@ def _print_results(
     output: Optional[str],
     fmt: Optional[str] = None,
     chains: Optional[List[ExploitChain]] = None,
+    target: str = "",
 ) -> None:
+    # Resolve effective format: default to markdown when --output given without --format.
+    effective_fmt = fmt or ("markdown" if output else None)
+
     # Write structured output first — always write even when findings list is empty.
-    if output and fmt:
-        _write_structured_output(findings, output, fmt, chains=chains or [])
+    if output and effective_fmt:
+        _write_structured_output(findings, output, effective_fmt, chains=chains or [], target=target)
 
     if not findings:
         click.echo()
@@ -242,17 +247,55 @@ def _print_results(
     _print_summary(findings)
     _print_chains(chains or [])
 
-    if output and not fmt:
-        out = Path(output)
-        out.mkdir(parents=True, exist_ok=True)
-        for f in findings:
-            (out / f"{f.id}.md").write_text(f.to_markdown())
-        for c in (chains or []):
-            (out / f"{c.id}.md").write_text(c.to_markdown())
-        click.echo(f"  Reports written → {output}/")
-        click.echo()
-
     sys.exit(1)
+
+
+def _build_markdown_report(
+    findings: List[Finding],
+    chains: List[ExploitChain],
+    target: str = "",
+) -> str:
+    """Build a single consolidated markdown report for all findings and chains."""
+    lines: List[str] = [
+        "# PyHunter Vulnerability Report",
+        "",
+        f"**Target:** `{target}`  ",
+        f"**Date:** {date.today()}  ",
+        f"**Findings:** {len(findings)} confirmed  ",
+        f"**Chains:** {len(chains)} exploit chain(s)",
+        "",
+        "---",
+        "",
+        "## Summary",
+        "",
+        "| Severity | Count |",
+        "|----------|-------|",
+    ]
+
+    by_sev = Counter(f.severity.value for f in findings)
+    for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+        count = by_sev.get(sev, 0)
+        if count:
+            lines.append(f"| {sev} | {count} |")
+
+    lines += ["", "---", "", "## Findings", ""]
+
+    for f in findings:
+        # Demote h1 heading to h3 so the report has a clean hierarchy.
+        finding_md = f.to_markdown().replace(f"# {f.id}", f"### {f.id}", 1)
+        lines.append(finding_md)
+        lines.append("---")
+        lines.append("")
+
+    if chains:
+        lines += ["## Exploit Chains", ""]
+        for c in chains:
+            chain_md = c.to_markdown().replace(f"# {c.id}", f"### {c.id}", 1)
+            lines.append(chain_md)
+            lines.append("---")
+            lines.append("")
+
+    return "\n".join(lines)
 
 
 def _write_structured_output(
@@ -260,6 +303,7 @@ def _write_structured_output(
     output: str,
     fmt: str,
     chains: Optional[List[ExploitChain]] = None,
+    target: str = "",
 ) -> None:
     out = Path(output)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -291,6 +335,9 @@ def _write_structured_output(
                 lines.append("")
         out.write_text("\n".join(lines))
         click.echo(f"  Text report written → {output}")
+    elif fmt == "markdown":
+        out.write_text(_build_markdown_report(findings, chains or [], target=target))
+        click.echo(f"  Markdown report written → {output}")
 
 
 def _print_finding(f: Finding) -> None:

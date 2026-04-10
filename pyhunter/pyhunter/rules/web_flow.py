@@ -1,26 +1,23 @@
-"""Rule: web/CLI user input flowing into dangerous sinks within function scope."""
+"""Rule: FLOW-WEB — web/CLI user input flowing into a dangerous sink.
+
+This rule performs intra-function taint tracking: it traces user-controlled
+values from framework request sources to a fixed set of dangerous sinks.
+It is the catch-all complement to the more specialised DESER-RCE and
+CMD-INJECT rules — it catches multi-hop flows (request → var → eval) that
+simpler per-sink rules may miss.
+"""
 from __future__ import annotations
 
 import ast
-from typing import Generator, List, Set
+from typing import Generator, List
 
 from pyhunter.models import Finding, Severity
 from pyhunter.rules import BaseRule
+from pyhunter.rules._sources import attr_chain, is_source, names
 
-_TAINT_SOURCES: set[tuple[str, ...]] = {
-    ("request", "args"),
-    ("request", "form"),
-    ("request", "json"),
-    ("request", "data"),
-    ("request", "files"),
-    ("request", "values"),
-    ("sys", "argv"),
-    ("os", "environ"),
-}
-
-_SOURCE_CALLS   = {"input"}
-_SOURCE_METHODS = {"getenv", "get_json", "get_data", "get"}
-
+# Dangerous sinks tracked by this rule.
+# (None, name)   → bare function call: eval(x)
+# (module, name) → attribute call:    os.system(x)
 _SINKS: set[tuple[str | None, str]] = {
     (None,         "eval"),
     (None,         "exec"),
@@ -36,39 +33,6 @@ _SINKS: set[tuple[str | None, str]] = {
 }
 
 
-# ── Taint helpers ─────────────────────────────────────────────────────────────
-
-def _attr_chain(node: ast.expr) -> tuple[str, ...]:
-    parts: list[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-        return tuple(reversed(parts))
-    return ()
-
-
-def _is_source(node: ast.expr) -> bool:
-    chain = _attr_chain(node)
-    if chain and any(chain[: len(s)] == s for s in _TAINT_SOURCES):
-        return True
-    if isinstance(node, ast.Subscript) and _is_source(node.value):
-        return True
-    if isinstance(node, ast.Call):
-        func = node.func
-        if isinstance(func, ast.Name) and func.id in _SOURCE_CALLS:
-            return True
-        if isinstance(func, ast.Attribute):
-            if func.attr in _SOURCE_METHODS and _is_source(func.value):
-                return True
-    return False
-
-
-def _names(node: ast.expr) -> Set[str]:
-    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
-
-
 def _sink_key(call: ast.Call) -> tuple[str | None, str] | None:
     if isinstance(call.func, ast.Name):
         return (None, call.func.id)
@@ -78,6 +42,7 @@ def _sink_key(call: ast.Call) -> tuple[str | None, str] | None:
 
 
 def _walk_stmts(stmts: list[ast.stmt]) -> Generator[ast.stmt, None, None]:
+    """Yield each statement and its immediate children recursively."""
     for stmt in stmts:
         yield stmt
         for child in ast.iter_child_nodes(stmt):
@@ -85,44 +50,48 @@ def _walk_stmts(stmts: list[ast.stmt]) -> Generator[ast.stmt, None, None]:
                 yield child
 
 
-# ── Rule ──────────────────────────────────────────────────────────────────────
-
 class WebInputFlowRule(BaseRule):
+    """Template Method: implements BaseRule.check() for web-input taint flows."""
+
     rule_id     = "FLOW-WEB"
     description = "Web/CLI user input flowing into a dangerous sink"
 
     def check(self, tree: ast.AST, source_lines: List[str], filepath: str) -> List[Finding]:
-        findings = []
+        findings: List[Finding] = []
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                findings.extend(self._check_function(node, source_lines, filepath))
+                findings.extend(self._check_fn(node, source_lines, filepath))
         return findings
 
-    def _check_function(
+    # ── per-function taint scan ───────────────────────────────────────────────
+
+    def _check_fn(
         self,
         func: ast.FunctionDef | ast.AsyncFunctionDef,
         source_lines: List[str],
         filepath: str,
     ) -> List[Finding]:
-        tainted: dict[str, str] = {}   # name → source description
+        tainted: dict[str, str] = {}
         findings: List[Finding] = []
 
         for stmt in _walk_stmts(func.body):
+            # Propagate taint through assignments
             rhs = self._rhs_of(stmt)
             if rhs is not None and self._is_tainted(rhs, tainted):
                 desc = self._source_desc(rhs, tainted)
-                for name in self._assigned_names(stmt):
-                    tainted[name] = desc
+                for var in self._assigned_names(stmt):
+                    tainted[var] = desc
 
-            for call in self._calls_in(stmt):
+            # Check sink calls within this statement
+            for call in self._sink_calls_in(stmt):
                 key = _sink_key(call)
                 if key not in _SINKS:
                     continue
-                arg_names = {n for arg in call.args for n in _names(arg)}
-                arg_names |= {n for kw in call.keywords for n in _names(kw.value)}
+                arg_names = {n for arg in call.args for n in names(arg)}
+                arg_names |= {n for kw in call.keywords for n in names(kw.value)}
                 hit = arg_names & tainted.keys()
                 if hit:
-                    module, name = key
+                    module, name_ = key
                     findings.append(Finding(
                         id=f"{self.rule_id}-{call.lineno:04d}",
                         rule_id=self.rule_id,
@@ -131,22 +100,21 @@ class WebInputFlowRule(BaseRule):
                         line=call.lineno,
                         snippet=self._snippet(source_lines, call.lineno),
                         source=", ".join(sorted(tainted[n] for n in hit)),
-                        sink=f"{module}.{name}" if module else name,
+                        sink=f"{module}.{name_}" if module else name_,
                     ))
 
         return findings
 
+    # ── helpers ───────────────────────────────────────────────────────────────
+
     def _is_tainted(self, expr: ast.expr, tainted: dict) -> bool:
-        return _is_source(expr) or bool(_names(expr) & tainted.keys())
+        return is_source(expr) or bool(names(expr) & tainted.keys())
 
     def _source_desc(self, expr: ast.expr, tainted: dict) -> str:
-        if _is_source(expr):
-            if isinstance(expr, ast.Call):
-                chain = _attr_chain(expr.func)
-            else:
-                chain = _attr_chain(expr)
+        if is_source(expr):
+            chain = attr_chain(expr.func if isinstance(expr, ast.Call) else expr)
             return ".".join(chain) if chain else "user input"
-        for n in _names(expr) & tainted.keys():
+        for n in names(expr) & tainted.keys():
             return tainted[n]
         return "user input"
 
@@ -166,7 +134,7 @@ class WebInputFlowRule(BaseRule):
             return [n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name)]
         return []
 
-    def _calls_in(self, stmt: ast.stmt) -> list[ast.Call]:
+    def _sink_calls_in(self, stmt: ast.stmt) -> list[ast.Call]:
         if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
             return [stmt.value]
         if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):

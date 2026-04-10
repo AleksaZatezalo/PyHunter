@@ -1,10 +1,15 @@
-"""Intra-procedural taint tracking engine.
+"""Intra-procedural taint-tracking engine.
 
-Propagates user-controlled values from sources to sinks within a single
-function body by walking statements in linear order.
+Design pattern: Visitor
+  TaintEngine.analyze() visits every function in an AST and, for each one,
+  walks its statement list in linear order to propagate taint from sources
+  to sinks.  The engine produces TaintFlow records that the Scanner merges
+  back into rule-generated findings.
 
-Sources: request.*, sys.argv, os.environ, input()
-Sinks:   eval, exec, compile, open, os.system, subprocess.*, pickle.*, yaml.load
+Taint model:
+  Sources — user-controlled inputs: request.*, sys.argv, os.environ, input()
+  Sinks   — dangerous call sites: eval, exec, open, os.system, subprocess.*,
+            pickle.loads, yaml.load
 """
 from __future__ import annotations
 
@@ -15,6 +20,8 @@ from typing import Generator, List, Set
 
 @dataclass
 class TaintFlow:
+    """A single resolved taint path from source to sink within one function."""
+
     source_expr:   str
     sink:          str
     file:          str
@@ -25,16 +32,36 @@ class TaintFlow:
 
 
 # ── Source / sink tables ──────────────────────────────────────────────────────
+# Kept self-contained to avoid an upward dependency on pyhunter.rules.
 
 _SOURCE_CHAINS: set[tuple[str, ...]] = {
-    ("request", "args"),   ("request", "form"),
-    ("request", "json"),   ("request", "data"),
-    ("request", "files"),  ("request", "values"),
-    ("sys", "argv"),       ("os", "environ"),
+    # Flask
+    ("request", "args"),    ("request", "form"),    ("request", "json"),
+    ("request", "data"),    ("request", "files"),   ("request", "values"),
+    ("request", "headers"), ("request", "cookies"),
+    # Django / DRF
+    ("request", "GET"),     ("request", "POST"),    ("request", "body"),
+    ("request", "FILES"),   ("request", "META"),    ("request", "COOKIES"),
+    ("request", "query_params"),
+    # Tornado
+    ("self", "request", "body"),
+    ("self", "request", "arguments"),
+    ("self", "request", "body_arguments"),
+    ("self", "request", "query_arguments"),
+    ("self", "request", "files"),
+    # Starlette
+    ("request", "query_params"), ("request", "path_params"),
+    # CLI / environment
+    ("sys", "argv"),
+    ("os",  "environ"),
 }
 
 _SOURCE_CALLS   = {"input"}
-_SOURCE_METHODS = {"getenv", "get_json", "get_data", "get"}
+_SOURCE_METHODS = {
+    "get", "get_json", "get_data", "getlist", "getfirst",
+    "get_argument", "get_query_argument", "get_body_argument", "get_arguments",
+    "body", "json", "form", "stream", "getenv",
+}
 
 _SINKS: set[tuple[str | None, str]] = {
     (None,         "eval"),
@@ -52,7 +79,7 @@ _SINKS: set[tuple[str | None, str]] = {
 }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── AST helpers ───────────────────────────────────────────────────────────────
 
 def _attr_chain(node: ast.expr) -> tuple[str, ...]:
     parts: list[str] = []
@@ -75,8 +102,10 @@ def _is_source(node: ast.expr) -> bool:
         func = node.func
         if isinstance(func, ast.Name) and func.id in _SOURCE_CALLS:
             return True
-        if isinstance(func, ast.Attribute) and func.attr in _SOURCE_METHODS and _is_source(func.value):
-            return True
+        if isinstance(func, ast.Attribute) and func.attr in _SOURCE_METHODS:
+            obj = _attr_chain(func.value)
+            if obj and obj[0] in ("request", "self", "os"):
+                return True
     return False
 
 
@@ -117,21 +146,28 @@ def _walk_stmts(stmts: list[ast.stmt]) -> Generator[ast.stmt, None, None]:
                 yield child
 
 
-# ── Engine ────────────────────────────────────────────────────────────────────
+# ── Visitor ───────────────────────────────────────────────────────────────────
 
 class TaintEngine:
+    """Visitor that walks every function in an AST and records taint flows.
+
+    Called once per file by the Scanner; its TaintFlow results are merged back
+    into rule-generated findings to populate ``Finding.source``.
+    """
+
     def analyze(self, tree: ast.AST, source_lines: list[str], filepath: str) -> List[TaintFlow]:
         flows: List[TaintFlow] = []
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                flows.extend(self._analyze_function(node, filepath))
+                flows.extend(self._visit_function(node, filepath))
         return flows
 
-    def _analyze_function(
+    def _visit_function(
         self,
         func: ast.FunctionDef | ast.AsyncFunctionDef,
         filepath: str,
     ) -> List[TaintFlow]:
+        # tainted maps variable name → (source_line, source_description)
         tainted: dict[str, tuple[int, str]] = {}
         flows:   List[TaintFlow]            = []
 
@@ -151,7 +187,9 @@ class TaintEngine:
                 for name in _unpack_names(stmt.target):
                     tainted[name] = (src_line or stmt.lineno, src_desc)
 
-            elif isinstance(stmt, ast.AugAssign) and _is_tainted(stmt.value, tainted) and isinstance(stmt.target, ast.Name):
+            elif (isinstance(stmt, ast.AugAssign)
+                  and _is_tainted(stmt.value, tainted)
+                  and isinstance(stmt.target, ast.Name)):
                 src_line, src_desc = _source_desc(stmt.value, tainted)
                 tainted[stmt.target.id] = (src_line or stmt.lineno, src_desc)
 
@@ -192,11 +230,9 @@ class TaintEngine:
             (tainted[n] for n in tainted_args), key=lambda t: t[0] or 0
         )
         module, name = key
-        sink_label = f"{module}.{name}" if module else name
-
         return TaintFlow(
             source_expr=src_desc,
-            sink=sink_label,
+            sink=f"{module}.{name}" if module else name,
             file=filepath,
             source_line=src_line or call.lineno,
             sink_line=call.lineno,

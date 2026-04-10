@@ -1,4 +1,11 @@
-"""Claude API wrapper with disk-based response caching."""
+"""Claude API wrapper with disk-based response caching.
+
+Design pattern: Strategy (via async_call_claude)
+  Each skill module (analyze, explain, poc, demo, context) is a Strategy: it
+  owns a fixed system prompt and result-parser, and delegates the actual API
+  call to async_call_claude (the shared context).  Swapping a skill means
+  changing its system prompt string, not touching the transport layer.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -8,7 +15,7 @@ from typing import Optional
 
 import anthropic
 
-_MODEL     = "claude-opus-4-5"
+_MODEL     = "claude-opus-4-6"
 _PROMPTS   = Path(__file__).parent / "prompts"
 _CACHE_DIR = Path.home() / ".cache" / "pyhunter"
 
@@ -48,6 +55,7 @@ def _cache_key(system: str, user: str) -> str:
 
 
 async def async_call_claude(system: str, user: str, max_tokens: int = 1024) -> str:
+    """Call Claude with caching. Identical (system, user) pairs are served from disk."""
     key        = _cache_key(system, user)
     cache_path = _CACHE_DIR / f"{key}.txt"
 

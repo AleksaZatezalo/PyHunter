@@ -1,54 +1,89 @@
 # PyHunter
 
-> AI-augmented Python vulnerability scanner — finds bugs, confirms exploitability, chains findings into end-to-end attack paths.
+> Static analysis tool for finding remote code execution vulnerabilities in Python web applications.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-PyHunter combines **AST-based static analysis**, an **intra-procedural taint engine**, and a **Claude-powered enrichment pipeline** to produce findings that go far beyond pattern matching. It validates whether each finding is genuinely exploitable, generates a minimal proof-of-concept payload and a runnable exploit script, then reasons about how multiple confirmed findings chain together into a complete attack path — from initial web-app access to host root.
+PyHunter scans Python web applications for paths that lead to **remote code execution**. It combines AST-based detection rules, an intra-procedural taint engine, and an optional Claude enrichment pipeline that validates whether each finding is genuinely exploitable, generates a proof-of-concept payload, and chains related findings into a complete attack narrative.
+
+Supported frameworks: **Flask, Django, DRF, FastAPI, Tornado, Starlette**.
 
 ---
 
-## How It Works
+## What it detects
+
+PyHunter focuses exclusively on vulnerability classes that result in, or directly enable, remote code execution.
+
+### Phase 1 — Initial Access
+
+How an attacker gets user-controlled input into dangerous code.
+
+| Rule | Description | Example sinks |
+|------|-------------|---------------|
+| `FLOW-WEB` | Web or CLI input flows to a dangerous sink within a function | `eval(request.args["q"])`, `os.system(form["cmd"])` |
+| `CMD-INJECT` | Tainted input reaches an OS command executor | `os.system`, `os.popen`, `subprocess.run(shell=True)` |
+| `DESER-RCE` | Tainted input passed to an unsafe deserialiser | `pickle.loads`, `yaml.load`, `dill.loads`, `jsonpickle.decode` |
+| `FILE-UPLOAD` | File saved without extension validation to an executable path | `f.save(user_path)`, `open(user_path, "wb")` |
+| `PICKLE-NET` | Pickle deserialization of data read from a network socket | `pickle.loads(sock.recv(...))`, `pickle.loads(response.content)` |
+
+### Phase 2 — Code Execution
+
+The mechanism that turns attacker input into arbitrary code execution.
+
+| Rule | Description | Example sinks |
+|------|-------------|---------------|
+| `RCE-EVAL` | Dynamic code execution via built-in functions | `eval(x)`, `exec(x)`, `compile(x, ...)` |
+| `EXEC-DECORATOR` | Dangerous or user-controlled expression used as a decorator | `@eval(user_expr)`, `@app.route(user_path)` |
+
+### Phase 3 — Supply Chain
+
+Code that runs at build or import time, enabling persistence across deployments.
+
+| Rule | Description | Trigger |
+|------|-------------|---------|
+| `RCE-BUILD` | Dangerous `setup()` arguments in `setup.py` | `setup(cmdclass=...)`, `setup(ext_modules=...)` |
+| `RCE-IMPORT` | Dangerous call executed at import time | `eval(...)` or `os.system(...)` in `__init__.py` or `setup.py` |
+
+---
+
+## How it works
 
 ```
-.py files
-    │
-    ▼
-AST rule match (15 rules)  +  taint engine
-    │
-    ▼  raw findings
-    │
-    ├─▶ Claude: analyze       is this genuinely exploitable? (confidence 0.0–1.0)
-    │          ▼ false positive? → dropped
-    ├─▶ Claude: explain       plain-English description + attack scenario
-    ├─▶ Claude: poc           minimal safe payload (e.g. {{7*7}}, id, whoami)
-    ├─▶ Claude: demo          runnable self-contained Python exploit script
-    └─▶ Claude: context       standalone vs. chained? prerequisites? impact?
-    │
-    ▼  per-finding verified reports
-    │
-    ▼
-Chain engine: group confirmed findings by attack phase
-    │
-    └─▶ Claude: chain         end-to-end attack narrative for cross-phase chains
-    │
-    ▼  ExploitChain reports
+.py source files
+      │
+      ▼
+AST rules (9 rules)  +  taint engine
+      │
+      ▼  raw findings
+      │
+      ├─▶ Claude: analyze       is this genuinely exploitable? (confidence 0.0–1.0)
+      │          ▼ false positive? → dropped
+      ├─▶ Claude: explain       plain-English description + attack scenario
+      ├─▶ Claude: poc           minimal safe payload (e.g. id, whoami, echo pwned)
+      ├─▶ Claude: demo          runnable self-contained Python exploit script
+      └─▶ Claude: context       standalone vs. chained? prerequisites? impact?
+      │
+      ▼  verified per-finding reports
+      │
+Chain engine: group confirmed findings by attack phase (1 → 2 → 3)
+      │
+      └─▶ Claude: chain         end-to-end attack narrative for multi-phase chains
 ```
 
-Each enrichment stage is a modular async skill in `pyhunter/skills/`. The chain engine runs after all findings are verified, so it only reasons about confirmed exploitable issues.
+Each enrichment step is a modular async skill in `pyhunter/skills/`. Chain analysis only runs on findings Claude has confirmed as exploitable.
 
 ---
 
 ## Installation
 
 ```bash
-git clone https://github.com/yourname/pyhunter
+git clone https://github.com/AleksaZatezalo/pyhunter
 cd pyhunter
 pip install -e ".[dev]"
 ```
 
-Set your Anthropic API key:
+Set your Anthropic API key (required for LLM enrichment; not needed for `--no-llm` mode):
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -56,199 +91,122 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ---
 
-## Usage
+## Running a scan
 
 ### Scan a file or directory
 
 ```bash
-# Full scan: AST + taint + Claude enrichment + chain analysis
-pyhunter scan ./target_project
+# Full scan: AST rules + taint + Claude enrichment + chain analysis
+pyhunter scan ./target_app/
 
-# AST + taint only — no API calls, instant results
-pyhunter scan ./target_project --no-llm
+# AST + taint only — no API calls, instant results, useful for CI
+pyhunter scan ./target_app/ --no-llm
 
-# Keep findings Claude marks as false positives
-pyhunter scan ./target_project --keep-fp
+# Include findings Claude marks as false positives
+pyhunter scan ./target_app/ --keep-fp
 
-# Write per-finding and per-chain markdown reports
-pyhunter scan ./target_project --output ./reports/
+# Write a consolidated markdown report
+pyhunter scan ./target_app/ --output report.md
 
-# Machine-readable JSON (findings + chains)
-pyhunter scan ./target_project --output report.json --format json
+# Machine-readable JSON (findings array + chains array)
+pyhunter scan ./target_app/ --output report.json --format json
+
+# Plain-text report
+pyhunter scan ./target_app/ --output report.txt --format text
 ```
 
-### Scan PyPI packages
+### Scan packages from PyPI
 
 ```bash
+# Scan one or more packages
 pyhunter pypi celery requests fabric
 
+# AST-only, save results + keep extracted sources
 pyhunter pypi celery \
   --no-llm \
   --output-dir ./pyhunter_results \
   --keep-sources
 ```
 
-Each package gets a subdirectory under `--output-dir` with one markdown file per finding and a `summary.json`.
+Each package gets a subdirectory under `--output-dir` containing per-finding `.md` files and a `summary.json`.
 
 ### Example terminal output
 
 ```
-  ██████╗ ██╗   ██╗██╗  ██╗██╗   ██╗███╗   ██╗████████╗███████╗██████╗
-  ...
-
-  AST scan complete — 6 raw findings  (0.1s)
+  AST scan complete — 4 raw findings  (0.1s)
   ────────────────────────────────────────────────────────────────────
-  AUTH-BYPASS           ████████████████████████████  2
+  FLOW-WEB              ████████████████████████████  2
   CMD-INJECT            ████████████████              1
-  CONTAINER-ESCAPE      ████████████████              1
-  HARDCODED-SECRET      ████████                      1
-  SSTI                  ████████                      1
+  DESER-RCE             ████████                      1
   ────────────────────────────────────────────────────────────────────
   Enriching with Claude …
 
-  ✓ [CRITICAL ] AUTH-BYPASS-0023   jwt.decode(verify=False)  exploitable    1/6 (16%)
-  ✓ [CRITICAL ] SSTI-0041          render_template_string    exploitable    2/6 (33%)
-  ✓ [HIGH     ] CMD-INJECT-0089    os.system                 exploitable    3/6 (50%)
-  ✓ [CRITICAL ] HARDCODED-SECRET   SECRET_KEY                exploitable    4/6 (66%)
-  ✓ [CRITICAL ] CONTAINER-ESCAPE   docker.run(privileged)    exploitable    5/6 (83%)
-  ✗ [HIGH     ] AUTH-BYPASS-0061   permission_classes=[]     false-positive 6/6 (100%)
+  ✓ [CRITICAL ] FLOW-WEB-0031      eval              exploitable    1/4 (25%)
+  ✓ [CRITICAL ] CMD-INJECT-0058    os.system         exploitable    2/4 (50%)
+  ✗ [CRITICAL ] FLOW-WEB-0074      pickle.loads      false-positive 3/4 (75%)
+  ✓ [CRITICAL ] DESER-RCE-0091     yaml.load(unsafe) exploitable    4/4 (100%)
 
   ══════════════════════════════════════════════════════════════════════
   EXPLOIT CHAINS — 1 chain(s) identified
   ══════════════════════════════════════════════════════════════════════
 
-  [CRITICAL]  CHAIN-001  —  AUTH-BYPASS + SSTI → CMD-INJECT → Container Escape
+  [CRITICAL]  CHAIN-001  —  FLOW-WEB → CMD-INJECT
 
-  ┌─ Attack Steps ────────────────────────────────────────────────────
-  │  1. [CRITICAL]  AUTH-BYPASS          views.py:23
-  │  2. [CRITICAL]  SSTI                 views.py:41
-  │  3. [HIGH    ]  CMD-INJECT           views.py:89
-  │  4. [CRITICAL]  CONTAINER-ESCAPE     deploy.py:14
+  ┌─ Attack Steps ─────────────────────────────────────────────────────
+  │  1. [CRITICAL]  FLOW-WEB    views.py:31
+  │  2. [CRITICAL]  CMD-INJECT  views.py:58
   └────────────────────────────────────────────────────────────────────
 
-  ┌─ Attack Narrative ─────────────────────────────────────────────────
-  │  An unauthenticated attacker first exploits the JWT bypass at
-  │  views.py:23 to forge an admin token. Using this token they reach
-  │  the admin template endpoint at views.py:41, injecting a Jinja2
-  │  payload to achieve RCE as www-data. They then pivot through the
-  │  os.system call at views.py:89 to write a cron backdoor, and
-  │  finally exploit the privileged Docker container at deploy.py:14
-  │  to escape to the host and obtain root.
-  └────────────────────────────────────────────────────────────────────
-
-  ┌─ Impact ───────────────────────────────────────────────────────────
-  │  Unauthenticated remote attacker achieves root on the Docker host.
-  └────────────────────────────────────────────────────────────────────
+  ┌─ Attack Narrative ──────────────────────────────────────────────────
+  │  An unauthenticated attacker sends a crafted HTTP request to the
+  │  search endpoint at views.py:31, where request.args flows directly
+  │  into eval(). The evaluated expression spawns a subprocess through
+  │  os.system at views.py:58, granting full shell access as the web
+  │  server process.
+  └─────────────────────────────────────────────────────────────────────
 ```
 
 ---
 
-## Vulnerability Coverage
+## Configuration
 
-The 15 active rules cover the complete web-app-to-root attack chain across Flask, Django, FastAPI, Tornado, and Starlette.
+Create `.pyhunterrc` (JSON) in your project root or home directory:
 
-### Phase 1 — Initial Access / RCE
+```json
+{
+    "disabled_rules": ["RCE-BUILD"],
+    "min_severity": "HIGH",
+    "cache_enabled": true
+}
+```
 
-| Rule ID | Description | Key Sinks | Severity |
-|---------|-------------|-----------|----------|
-| `SSTI` | Server-side template injection | Jinja2/Mako/Django `Template`, `render_template_string`, `from_string` | CRITICAL |
-| `DESER-RCE` | Unsafe deserialization | `pickle.loads`, `yaml.load`, `dill.loads`, `jsonpickle.decode` | CRITICAL |
-| `CMD-INJECT` | OS command injection | `os.system`, `os.popen`, `subprocess.run(shell=True)` | CRITICAL |
-| `DEBUG-EXPOSED` | Exposed debug console | `app.run(debug=True)`, `DEBUG=True`, Werkzeug REPL | HIGH |
-| `FILE-UPLOAD-RCE` | Unrestricted file upload | `f.save()` with unsanitised filename, write to executable paths | HIGH |
-
-### Phase 2 — Data Exfiltration / Lateral Movement
-
-| Rule ID | Description | Key Sinks | Severity |
-|---------|-------------|-----------|----------|
-| `SQL-INJECT` | SQL injection | `cursor.execute(f"...")`, `queryset.raw(f"...")`, `.extra(where=[f"..."])` | HIGH |
-| `SSRF` | Server-side request forgery | `requests.get(url)`, `urllib.request.urlopen(url)` with user-controlled URL | HIGH |
-| `XXE` | XML external entity injection | `etree.parse`, `minidom.parse`, `lxml.etree.XML` without safe parser | HIGH |
-| `PATH-TRAVERSAL` | Path traversal / zip slip | `open(user_path)`, `send_from_directory`, `FileResponse(tainted)` | HIGH |
-
-### Phase 3 — Credential Theft
-
-| Rule ID | Description | Key Patterns | Severity |
-|---------|-------------|--------------|----------|
-| `HARDCODED-SECRET` | Credentials in source | API keys, JWT secrets, private keys, DB passwords assigned as literals | HIGH |
-
-### Phase 4 — Auth / Privilege Bypass
-
-| Rule ID | Description | Key Patterns | Severity |
-|---------|-------------|--------------|----------|
-| `AUTH-BYPASS` | Authentication bypass | `jwt.decode(verify=False)`, DRF `permission_classes=[]`, unprotected FastAPI sensitive routes | HIGH |
-| `MASS-ASSIGN` | Mass assignment | `Model(**request.json)`, `User(**request.data)`, `Profile(**form)` | HIGH |
-
-### Phase 5 — Host Privilege Escalation
-
-| Rule ID | Description | Key Sinks | Severity |
-|---------|-------------|-----------|----------|
-| `SUID-RISK` | SUID / privilege escalation | `os.setuid(0)`, `os.chmod(path, 0o4755)`, SUID binary exec | HIGH |
-| `WRITABLE-PATH` | Write to sensitive paths | Write to `/etc/cron*`, `/etc/sudoers*`, `/root/.ssh/authorized_keys`, `systemd` units | CRITICAL |
-| `CONTAINER-ESCAPE` | Container escape | Docker socket access, `privileged=True`, `--pid=host`, `cap_add`, `volumes={"/": ...}` | CRITICAL |
+| Key | Default | Description |
+|-----|---------|-------------|
+| `disabled_rules` | `[]` | Rule IDs to skip |
+| `min_severity` | `null` | Drop findings below this level (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`) |
+| `cache_enabled` | `true` | Cache Claude responses on disk (`~/.cache/pyhunter/`) |
 
 ---
 
-## Exploit Chain Analysis
-
-When multiple confirmed findings span two or more attack phases, the chain engine identifies them as a cross-phase sequence and asks Claude to write a specific, realistic attack narrative.
-
-### How chains are built
-
-```
-Confirmed findings
-    │
-    ▼
-Group by attack phase (1–5)
-    │
-    ▼  2+ phases present?
-    │
-    ├─ Full chain: one best-severity finding per phase, in attack-timeline order
-    │  (auth bypass → credential theft → data exfil → RCE → host privesc)
-    │
-    ├─ RCE → Container Escape  (phases 1 + 5)
-    │
-    └─ Auth Bypass → Data Exfil  (phases 4 + 2)
-    │
-    ▼
-Claude writes narrative, prerequisites, and impact for each chain
-```
-
-### `ExploitChain` fields
-
-| Field | Description |
-|-------|-------------|
-| `id` | `CHAIN-001`, `CHAIN-002`, … |
-| `title` | `AUTH-BYPASS + SSTI → CONTAINER-ESCAPE` |
-| `severity` | Maximum severity across steps |
-| `steps` | Ordered list of `Finding` objects |
-| `narrative` | Step-by-step attack story (Claude) |
-| `prerequisites` | Minimum attacker access required |
-| `impact` | Final attacker capability |
-
-Chains appear in console output after the per-finding summary, in markdown output files as `CHAIN-NNN.md`, and in JSON output under the `chains` key.
-
----
-
-## JSON Output Schema
+## JSON output schema
 
 ```json
 {
   "findings": [
     {
-      "id": "SSTI-0041",
-      "rule_id": "SSTI",
+      "id": "FLOW-WEB-0031",
+      "rule_id": "FLOW-WEB",
       "severity": "CRITICAL",
       "file": "app/views.py",
-      "line": 41,
+      "line": 31,
       "snippet": "...",
-      "sink": "render_template_string",
+      "sink": "eval",
       "source": "request.args",
       "exploitable": true,
-      "confidence": 0.95,
-      "analysis": "User input reaches render_template_string with no sanitisation.",
+      "confidence": 0.97,
+      "analysis": "request.args flows into eval() with no sanitisation.",
       "explanation": "...",
-      "poc": "{{7*7}}",
+      "poc": "'; import os; os.system('id') #",
       "demo": "...",
       "context": "..."
     }
@@ -256,12 +214,12 @@ Chains appear in console output after the per-finding summary, in markdown outpu
   "chains": [
     {
       "id": "CHAIN-001",
-      "title": "AUTH-BYPASS + SSTI → CONTAINER-ESCAPE",
+      "title": "FLOW-WEB → CMD-INJECT",
       "severity": "CRITICAL",
-      "steps": ["AUTH-BYPASS-0023", "SSTI-0041", "CONTAINER-ESCAPE-0014"],
+      "steps": ["FLOW-WEB-0031", "CMD-INJECT-0058"],
       "narrative": "...",
-      "prerequisites": "Unauthenticated remote access to the login endpoint.",
-      "impact": "Root on the Docker host."
+      "prerequisites": "Unauthenticated HTTP access to the search endpoint.",
+      "impact": "Arbitrary shell command execution as the web server process."
     }
   ]
 }
@@ -269,41 +227,44 @@ Chains appear in console output after the per-finding summary, in markdown outpu
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
 pyhunter/
-├── cli.py                    # Click CLI — scan, pypi commands; chain display
-├── models.py                 # Finding + ExploitChain dataclasses
+├── cli.py                    # CLI — scan, pypi commands; terminal output
+├── models.py                 # Finding and ExploitChain dataclasses
 ├── config.py                 # .pyhunterrc / .pyhunter.json loader
 ├── engine/
-│   ├── scanner.py            # orchestrates rules + taint → enrichment → chains
+│   ├── scanner.py            # pipeline: collect → parse → enrich → chain
 │   ├── chainer.py            # groups findings by phase, builds chain candidates
-│   └── pypi.py               # PyPI download, extract, scan, report
+│   └── pypi.py               # PyPI package download, extract, scan, report
 ├── rules/
-│   ├── __init__.py           # BaseRule interface
-│   ├── registry.py           # 15 active rules
-│   ├── _sources.py           # multi-framework taint source helpers
-│   ├── r01_ssti.py           # … r15_container_escape.py
-│   └── ...                   # additional experimental rules
+│   ├── __init__.py           # BaseRule abstract base class (Template Method)
+│   ├── registry.py           # registers all 9 active rules (Registry pattern)
+│   ├── _sources.py           # shared taint-source vocabulary for all frameworks
+│   ├── web_flow.py           # FLOW-WEB
+│   ├── cmd_injection.py      # CMD-INJECT
+│   ├── deser_rce.py          # DESER-RCE
+│   ├── file_upload_rce.py    # FILE-UPLOAD
+│   ├── pickle_socket.py      # PICKLE-NET
+│   ├── rce_eval.py           # RCE-EVAL
+│   ├── decorator_exec.py     # EXEC-DECORATOR
+│   ├── build_rce.py          # RCE-BUILD
+│   └── import_time_exec.py   # RCE-IMPORT
 ├── skills/
-│   ├── __init__.py           # async_call_claude() with disk caching
-│   ├── enrich.py             # 5-stage per-finding pipeline orchestrator
+│   ├── __init__.py           # async_call_claude() with disk cache (Strategy)
+│   ├── enrich.py             # 5-stage per-finding pipeline (Chain of Responsibility)
 │   ├── analyze.py            # exploitability verdict + confidence score
 │   ├── explain.py            # developer-friendly explanation
 │   ├── poc.py                # minimal safe payload
 │   ├── demo.py               # runnable self-contained exploit script
-│   ├── context.py            # standalone vs. chained context per finding
-│   └── chain.py              # cross-finding chain narrative (Claude JSON)
+│   ├── context.py            # standalone vs. chained context
+│   └── chain.py              # cross-finding chain narrative
 └── taint/
-    └── __init__.py           # intra-procedural taint engine (multi-hop)
-examples/
-└── vulnerable_app.py         # deliberately vulnerable Flask app
-scripts/
-└── github_scan.py            # mass-scan GitHub repositories
+    └── __init__.py           # intra-procedural taint engine (Visitor pattern)
 tests/
-├── test_rules.py
-├── test_chain_rules.py
+├── test_rules.py             # unit tests for all 9 rules (no LLM)
+├── test_chain_rules.py       # tests for DESER-RCE, CMD-INJECT, FILE-UPLOAD
 ├── test_chain_rules_extended.py
 ├── test_taint.py
 ├── test_cli.py
@@ -313,74 +274,85 @@ tests/
 
 ---
 
-## Adding a New Rule
+## Running tests
+
+No API key is needed for the test suite. All rule tests use direct AST input with no LLM calls.
+
+```bash
+# Install dev dependencies
+pip install -e ".[dev]"
+
+# Run the full test suite
+pytest tests/ -v
+
+# Run only the rule unit tests (fastest)
+pytest tests/test_rules.py tests/test_chain_rules.py tests/test_chain_rules_extended.py -v
+
+# Run with coverage
+pytest tests/ --cov=pyhunter --cov-report=term-missing
+```
+
+The test files each have a clear scope:
+
+| File | What it tests |
+|------|---------------|
+| `test_rules.py` | Every rule individually: correct detections + safe negatives |
+| `test_chain_rules.py` | DESER-RCE, CMD-INJECT, FILE-UPLOAD across Flask/Django/FastAPI/Tornado |
+| `test_chain_rules_extended.py` | Multi-hop taint, alternative string formats, edge cases |
+| `test_taint.py` | Standalone taint engine: source detection, propagation, sink matching |
+| `test_cli.py` | CLI flag behaviour, output format selection |
+| `test_pypi_scanner.py` | PyPI download/extract/report pipeline |
+| `test_integration.py` | End-to-end scan on a real vulnerable fixture file |
+
+---
+
+## Adding a rule
 
 1. Create `pyhunter/rules/my_rule.py` subclassing `BaseRule`
-2. Implement `check(tree, source_lines, filepath) -> List[Finding]`
+2. Implement `check(tree, source_lines, filepath) → List[Finding]`
 3. Register it in `pyhunter/rules/registry.py`
 
 ```python
 from pyhunter.rules import BaseRule
+from pyhunter.rules._sources import is_tainted_expr, collect_taint
 from pyhunter.models import Finding, Severity
 import ast
 
 class MyRule(BaseRule):
     rule_id     = "MY-RULE"
-    description = "Detects dangerous pattern X."
+    description = "Short description of what this detects."
 
     def check(self, tree, source_lines, filepath):
         findings = []
         for node in ast.walk(tree):
-            # ... match the pattern ...
-            findings.append(Finding(
-                id=f"{self.rule_id}-{node.lineno:04d}",
-                rule_id=self.rule_id,
-                severity=Severity.HIGH,
-                file=filepath,
-                line=node.lineno,
-                snippet=self._snippet(source_lines, node.lineno),
-                sink="dangerous_function",
-            ))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                tainted, _ = collect_taint(node)
+                for call in ast.walk(node):
+                    if not isinstance(call, ast.Call):
+                        continue
+                    # match your pattern, check is_tainted_expr(arg, tainted)
+                    findings.append(Finding(
+                        id=f"{self.rule_id}-{call.lineno:04d}",
+                        rule_id=self.rule_id,
+                        severity=Severity.CRITICAL,
+                        file=filepath,
+                        line=call.lineno,
+                        snippet=self._snippet(source_lines, call.lineno),
+                        sink="dangerous_function",
+                    ))
         return findings
 ```
 
-To place the rule in the exploit chain, add its `rule_id` to `PHASE_MAP` in `pyhunter/engine/chainer.py`.
-
----
-
-## Running Tests
-
-```bash
-# Unit + integration tests (no API key needed)
-pytest tests/ -v
-
-# With coverage
-pytest --cov=pyhunter --cov-report=term-missing
-```
-
----
-
-## Mass GitHub Scanning
-
-```bash
-pip install PyGithub
-export GITHUB_TOKEN=ghp_...
-
-python scripts/github_scan.py \
-  --query "eval request.args language:Python" \
-  --limit 20 \
-  --output github_report.json
-```
+To include the rule in chain analysis, add its `rule_id` to `PHASE_MAP` in `engine/chainer.py`.
 
 ---
 
 ## Safety
 
-PyHunter is a defensive security research tool.
+PyHunter is a defensive security testing tool. Use it only on applications you own or have explicit written permission to test.
 
-- Generated payloads demonstrate exploitability without causing real harm (`id`, `whoami`, `{{7*7}}` — not destructive commands)
-- Always follow responsible disclosure when reporting findings to third parties
-- Do not scan systems you do not own or have explicit permission to test
+- PoC payloads use safe commands only (`id`, `whoami`, `echo pwned`) — no destructive operations
+- Follow responsible disclosure when reporting findings to third parties
 
 ---
 

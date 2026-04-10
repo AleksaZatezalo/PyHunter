@@ -1,4 +1,17 @@
-"""Scan pipeline: collect files → parse → rules + taint → async LLM enrichment → chain analysis."""
+"""Scan pipeline: collect files → parse → rules + taint → async LLM enrichment → chain.
+
+Design pattern: Pipeline (behavioural)
+  Each stage of Scanner.scan() transforms its input into the input for the next:
+
+    _collect()          Path          → List[Path]       (file discovery)
+    _parse()            Path          → List[Finding]    (AST rules + taint)
+    _merge_taint()      findings      → findings         (annotate source fields)
+    _enrich_all()       findings      → findings         (Claude exploitability)
+    Chainer.build()     findings      → ExploitChains    (multi-phase chain analysis)
+
+  Each stage is a private method with a single responsibility. The public
+  scan() method is the only entry point.
+"""
 from __future__ import annotations
 
 import ast
@@ -25,16 +38,17 @@ class Scanner:
     scan(target) → List[Finding]
         1. Collect .py files under target
         2. Parse each file: run rules + taint engine
-        3. Merge taint flows into findings
+        3. Merge taint flows into findings (populates Finding.source)
         4. Enrich each finding via Claude (async, rate-limited)
-        5. Build exploit chains from verified findings (async, Claude-narrated)
+        5. Build exploit chains from confirmed findings (async, Claude-narrated)
 
-    After scan() returns, scanner.chains holds any identified ExploitChain objects.
+    After scan() returns, ``scanner.chains`` holds any ExploitChain objects.
 
-    Callbacks:
-        raw_findings_callback(findings)          — called after AST parse, before enrichment
-        progress_callback(completed, total, f)   — called after each enrichment completes;
-                                                   f is the enriched Finding or None if filtered
+    Callbacks (set before calling scan):
+        raw_findings_callback(findings)          — after AST parse, before enrichment
+        progress_callback(completed, total, f)   — after each enrichment completes;
+                                                   f is the enriched Finding or None
+                                                   if filtered as a false positive
     """
 
     def __init__(
@@ -63,14 +77,14 @@ class Scanner:
             return raw_findings
         return asyncio.run(self._enrich_and_chain(raw_findings))
 
-    # ── File collection ───────────────────────────────────────────────────────
+    # ── Stage 1: file collection ──────────────────────────────────────────────
 
     def _collect(self, path: Path) -> List[Path]:
         if path.is_file() and path.suffix == ".py":
             return [path]
         return list(path.rglob("*.py"))
 
-    # ── Per-file parsing ──────────────────────────────────────────────────────
+    # ── Stage 2: per-file parsing ─────────────────────────────────────────────
 
     def _parse(self, filepath: Path) -> List[Finding]:
         try:
@@ -88,9 +102,10 @@ class Scanner:
         self._merge_taint(findings, flows)
         return findings
 
-    # ── Taint merge ───────────────────────────────────────────────────────────
+    # ── Stage 3: taint merge ──────────────────────────────────────────────────
 
     def _merge_taint(self, findings: List[Finding], flows: List[TaintFlow]) -> None:
+        """Annotate Finding.source using standalone taint-engine flows."""
         index = {(f.sink, f.sink_line): f for f in flows}
         for finding in findings:
             if finding.sink is None or finding.source is not None:
@@ -105,7 +120,7 @@ class Scanner:
             if flow:
                 finding.source = flow.source_expr
 
-    # ── Async LLM enrichment + chain analysis ────────────────────────────────
+    # ── Stages 4 + 5: async enrichment and chain analysis ────────────────────
 
     async def _enrich_and_chain(self, findings: List[Finding]) -> List[Finding]:
         enriched    = await self._enrich_all(findings)
@@ -117,18 +132,18 @@ class Scanner:
         completed = 0
         sem       = asyncio.Semaphore(_CONCURRENCY)
 
-        async def enrich_and_track(f: Finding) -> Optional[Finding]:
+        async def _enrich_one(f: Finding) -> Optional[Finding]:
             nonlocal completed
             async with sem:
                 try:
                     result = await enrich(f, skip_false_positives=self.skip_false_positives)
                 except Exception as exc:
                     print(f"\n  [!] Enrichment error ({f.id}): {exc}", file=sys.stderr)
-                    result = f  # keep raw finding on API failure
+                    result = f
             completed += 1
             if self.progress_callback:
                 self.progress_callback(completed, total, result)
             return result
 
-        results = await asyncio.gather(*[enrich_and_track(f) for f in findings])
+        results = await asyncio.gather(*[_enrich_one(f) for f in findings])
         return [r for r in results if r is not None]

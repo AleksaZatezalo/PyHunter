@@ -1,55 +1,44 @@
-"""Active detection rules — focused on the top-15 web-app-to-root exploit chain.
+"""Rule registry — returns the active set of detection rules.
 
-Each rule targets a specific stage of the chain:
-  Initial access  → SSTI, DESER-RCE, CMD-INJECT, DEBUG-EXPOSED, FILE-UPLOAD
-  Data / pivoting → SQL-INJECT, SSRF, XXE, PATH-TRAVERSAL
-  Credential      → HARDCODED-SECRET
-  Auth bypass     → AUTH-BYPASS, MASS-ASSIGN
-  Privesc         → SUID-RISK, WRITABLE-PATH, CONTAINER-ESCAPE
+Design pattern: Registry (creational)
+  all_rules() is the single point of registration. The Scanner queries it at
+  startup and filters out any rules disabled in .pyhunterrc. Adding a new rule
+  means adding one import and one constructor call here — nothing else changes.
+
+Current rule set (9 rules across 3 attack phases):
+
+  Initial Access  ─ FLOW-WEB, CMD-INJECT, DESER-RCE, FILE-UPLOAD, PICKLE-NET
+  Code Execution  ─ RCE-EVAL, EXEC-DECORATOR
+  Supply Chain    ─ RCE-BUILD, RCE-IMPORT
 """
 from __future__ import annotations
 
-from pyhunter.rules.r01_ssti             import SSTIRule
-from pyhunter.rules.r02_deser_rce        import DeserRCERule
-from pyhunter.rules.r03_cmd_inject       import CmdInjectRule
-from pyhunter.rules.r04_debug_exposed    import DebugExposedRule
-from pyhunter.rules.r05_file_upload_rce  import FileUploadRCERule
-from pyhunter.rules.r06_sqli             import SQLInjectRule
-from pyhunter.rules.r07_ssrf             import SSRFRule
-from pyhunter.rules.r08_xxe              import XXERule
-from pyhunter.rules.r09_path_traversal   import PathTraversalRule
-from pyhunter.rules.r10_hardcoded_secrets import HardcodedSecretsRule
-from pyhunter.rules.r11_auth_bypass      import AuthBypassRule
-from pyhunter.rules.r12_mass_assign      import MassAssignRule
-from pyhunter.rules.r13_suid_risk        import SUIDRiskRule
-from pyhunter.rules.r14_writable_path    import WritablePathRule
-from pyhunter.rules.r15_container_escape import ContainerEscapeRule
+from pyhunter.rules.rce_eval        import DynamicCodeExecutionRule
+from pyhunter.rules.import_time_exec import ImportTimeExecRule
+from pyhunter.rules.build_rce       import BuildInstallRCERule
+from pyhunter.rules.web_flow        import WebInputFlowRule
+from pyhunter.rules.decorator_exec  import DecoratorExecutionRule
+from pyhunter.rules.pickle_socket   import PickleOverSocketRule
+from pyhunter.rules.cmd_injection   import CommandInjectionRule
+from pyhunter.rules.deser_rce       import DeserRCERule
+from pyhunter.rules.file_upload_rce import FileUploadRCERule
 
 
 def all_rules():
+    """Return one fresh instance of every active detection rule."""
     return [
-        # ── Initial access ────────────────────────────────────────────────────
-        SSTIRule(),           # Template injection → RCE
-        DeserRCERule(),       # pickle/YAML/jsonpickle → RCE
-        CmdInjectRule(),      # OS command injection → RCE
-        DebugExposedRule(),   # Debug console / Werkzeug REPL → RCE
-        FileUploadRCERule(),  # Webshell upload → RCE
+        # ── Initial Access ────────────────────────────────────────────────────
+        WebInputFlowRule(),       # FLOW-WEB    — web/CLI input → dangerous sink
+        CommandInjectionRule(),   # CMD-INJECT  — user input → OS command executor
+        DeserRCERule(),           # DESER-RCE   — user input → deserialiser (pickle/yaml/…)
+        FileUploadRCERule(),      # FILE-UPLOAD — unvalidated upload → webshell
+        PickleOverSocketRule(),   # PICKLE-NET  — pickle over network socket
 
-        # ── Data exfiltration & lateral movement ──────────────────────────────
-        SQLInjectRule(),      # SQLi → creds dump, file write, DB RCE
-        SSRFRule(),           # SSRF → cloud metadata, internal services
-        XXERule(),            # XXE → file read, SSRF pivot
-        PathTraversalRule(),  # Path traversal → read SSH keys, .env, source
+        # ── Code Execution ────────────────────────────────────────────────────
+        DynamicCodeExecutionRule(),  # RCE-EVAL       — eval/exec/compile
+        DecoratorExecutionRule(),    # EXEC-DECORATOR — dynamic/dangerous decorator
 
-        # ── Credential access ─────────────────────────────────────────────────
-        HardcodedSecretsRule(),  # Hardcoded keys → direct DB/cloud/SSH access
-
-        # ── Authentication & authorisation bypass ─────────────────────────────
-        AuthBypassRule(),     # JWT bypass, DRF no-auth, FastAPI unprotected routes
-        MassAssignRule(),     # Mass assignment → is_admin=True, role=superuser
-
-        # ── Privilege escalation (post-RCE) ───────────────────────────────────
-        SUIDRiskRule(),          # SUID binary abuse, chmod +s, ctypes.setuid(0)
-        WritablePathRule(),      # Write to cron/sudoers/authorized_keys
-        ContainerEscapeRule(),   # Docker socket, privileged container, cap_sys_admin
+        # ── Supply Chain ──────────────────────────────────────────────────────
+        BuildInstallRCERule(),    # RCE-BUILD  — setup.py cmdclass → build-time RCE
+        ImportTimeExecRule(),     # RCE-IMPORT — dangerous call at import time
     ]

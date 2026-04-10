@@ -1,18 +1,15 @@
-"""Unit tests for all AST-based rules (no LLM calls)."""
+"""Unit tests for all AST-based detection rules (no LLM calls)."""
 
 import ast
 import pytest
 
-from pyhunter.rules.rce_eval import DynamicCodeExecutionRule
-from pyhunter.rules.cmd_injection import CommandInjectionRule
-from pyhunter.rules.unsafe_deserialization import UnsafeDeserializationRule
-from pyhunter.rules.dunder_abuse import DunderAbuseRule
-from pyhunter.rules.import_time_exec import ImportTimeExecRule
-from pyhunter.rules.build_rce import BuildInstallRCERule
-from pyhunter.rules.path_traversal import PathTraversalRule
-from pyhunter.rules.dynamic_import import DynamicImportRule
-from pyhunter.rules.web_flow import WebInputFlowRule
-from pyhunter.rules.decorator_exec import DecoratorExecutionRule
+from pyhunter.rules.rce_eval         import DynamicCodeExecutionRule
+from pyhunter.rules.cmd_injection     import CommandInjectionRule
+from pyhunter.rules.import_time_exec  import ImportTimeExecRule
+from pyhunter.rules.build_rce         import BuildInstallRCERule
+from pyhunter.rules.web_flow          import WebInputFlowRule
+from pyhunter.rules.decorator_exec    import DecoratorExecutionRule
+from pyhunter.rules.pickle_socket     import PickleOverSocketRule
 
 
 def _parse(src: str):
@@ -47,62 +44,52 @@ class TestDynamicCodeExecutionRule:
 class TestCommandInjectionRule:
     rule = CommandInjectionRule()
 
-    def test_detects_os_system(self):
-        tree, lines = _parse("import os\nos.system('ls ' + path)")
+    def test_detects_tainted_os_system(self):
+        src = """\
+import os
+from flask import request
+def view():
+    cmd = request.args.get("host")
+    os.system(cmd)
+"""
+        tree, lines = _parse(src)
         findings = self.rule.check(tree, lines, "test.py")
         assert any(f.sink == "os.system" for f in findings)
 
-    def test_detects_subprocess_shell_true(self):
-        src = "import subprocess\nsubprocess.run(cmd, shell=True)"
+    def test_detects_tainted_subprocess_shell_true(self):
+        src = """\
+import subprocess
+from flask import request
+def run():
+    cmd = request.form.get("cmd")
+    subprocess.run(cmd, shell=True)
+"""
         tree, lines = _parse(src)
         findings = self.rule.check(tree, lines, "test.py")
         assert len(findings) == 1
+
+    def test_untainted_os_system_not_flagged(self):
+        """Bare os.system without a web source is not flagged (no noise)."""
+        src = """\
+import os
+def backup():
+    os.system("tar -czf /tmp/backup.tar.gz /app")
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "test.py")
+        assert findings == []
 
     def test_subprocess_shell_false_safe(self):
-        src = "import subprocess\nsubprocess.run(['ls', path], shell=False)"
+        src = """\
+import subprocess
+from flask import request
+def run():
+    path = request.args.get("file")
+    subprocess.run(["ls", path], shell=False)
+"""
         tree, lines = _parse(src)
         findings = self.rule.check(tree, lines, "test.py")
         assert findings == []
-
-
-# ── Unsafe deserialization ────────────────────────────────────────────────────
-
-class TestUnsafeDeserializationRule:
-    rule = UnsafeDeserializationRule()
-
-    def test_detects_pickle_loads(self):
-        tree, lines = _parse("import pickle\npickle.loads(data)")
-        findings = self.rule.check(tree, lines, "test.py")
-        assert len(findings) == 1
-        assert findings[0].sink == "pickle.loads"
-
-    def test_detects_yaml_load_unsafe(self):
-        src = "import yaml\nyaml.load(data, Loader=yaml.Loader)"
-        tree, lines = _parse(src)
-        findings = self.rule.check(tree, lines, "test.py")
-        assert len(findings) == 1
-
-    def test_yaml_safe_load_no_finding(self):
-        src = "import yaml\nyaml.safe_load(data)"
-        tree, lines = _parse(src)
-        findings = self.rule.check(tree, lines, "test.py")
-        assert findings == []
-
-
-# ── Dunder abuse ──────────────────────────────────────────────────────────────
-
-class TestDunderAbuseRule:
-    rule = DunderAbuseRule()
-
-    def test_detects_class_access(self):
-        tree, lines = _parse("x = obj.__class__")
-        findings = self.rule.check(tree, lines, "test.py")
-        assert any(f.sink == "__class__" for f in findings)
-
-    def test_detects_subclasses(self):
-        tree, lines = _parse("subs = obj.__class__.__subclasses__()")
-        findings = self.rule.check(tree, lines, "test.py")
-        assert len(findings) >= 1
 
 
 # ── Import-time execution ─────────────────────────────────────────────────────
@@ -149,56 +136,6 @@ class TestBuildInstallRCERule:
         src = "from setuptools import setup\nsetup(name='x', version='1.0')"
         tree, lines = _parse(src)
         findings = self.rule.check(tree, lines, "setup.py")
-        assert findings == []
-
-
-# ── Path traversal ────────────────────────────────────────────────────────────
-
-class TestPathTraversalRule:
-    rule = PathTraversalRule()
-
-    def test_detects_dynamic_open(self):
-        tree, lines = _parse("open(user_path, 'r')")
-        findings = self.rule.check(tree, lines, "app.py")
-        assert any(f.sink == "open" for f in findings)
-
-    def test_safe_literal_open(self):
-        tree, lines = _parse("open('/etc/config.txt', 'r')")
-        findings = self.rule.check(tree, lines, "app.py")
-        assert findings == []
-
-    def test_detects_zip_extractall(self):
-        src = "import zipfile\nwith zipfile.ZipFile(f) as z:\n    z.extractall(dest)"
-        tree, lines = _parse(src)
-        findings = self.rule.check(tree, lines, "app.py")
-        assert any("extractall" in f.sink for f in findings)
-
-
-# ── Dynamic import ────────────────────────────────────────────────────────────
-
-class TestDynamicImportRule:
-    rule = DynamicImportRule()
-
-    def test_detects_dunder_import_dynamic(self):
-        tree, lines = _parse("__import__(user_module)")
-        findings = self.rule.check(tree, lines, "app.py")
-        assert any(f.sink == "__import__" for f in findings)
-
-    def test_safe_dunder_import_literal(self):
-        tree, lines = _parse("__import__('os')")
-        findings = self.rule.check(tree, lines, "app.py")
-        assert findings == []
-
-    def test_detects_importlib_dynamic(self):
-        src = "import importlib\nimportlib.import_module(user_input)"
-        tree, lines = _parse(src)
-        findings = self.rule.check(tree, lines, "app.py")
-        assert any(f.sink == "importlib.import_module" for f in findings)
-
-    def test_safe_importlib_literal(self):
-        src = "import importlib\nimportlib.import_module('json')"
-        tree, lines = _parse(src)
-        findings = self.rule.check(tree, lines, "app.py")
         assert findings == []
 
 
@@ -310,3 +247,44 @@ def handler():
         tree, lines = _parse(src)
         findings = self.rule.check(tree, lines, "app.py")
         assert any("eval" in f.sink for f in findings)
+
+
+# ── Pickle over network socket ────────────────────────────────────────────────
+
+class TestPickleOverSocketRule:
+    rule = PickleOverSocketRule()
+
+    def test_detects_pickle_loads_from_recv(self):
+        src = """\
+import pickle, socket
+def serve():
+    s = socket.socket()
+    data = s.recv(4096)
+    pickle.loads(data)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "server.py")
+        assert any(f.sink == "pickle.loads" for f in findings)
+
+    def test_detects_pickle_loads_from_response_content(self):
+        src = """\
+import pickle, requests
+def fetch():
+    resp = requests.get("http://internal/data")
+    return pickle.loads(resp.content)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "client.py")
+        assert len(findings) >= 1
+        assert all(f.sink == "pickle.loads" for f in findings)
+
+    def test_safe_pickle_from_local_file(self):
+        src = """\
+import pickle
+def load_model():
+    with open("model.pkl", "rb") as f:
+        return pickle.load(f)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "app.py")
+        assert findings == []
