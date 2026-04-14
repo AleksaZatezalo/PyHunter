@@ -1,0 +1,22 @@
+id: AGENT-SHELL
+description: "subprocess called with shell=True and a non-literal command — dangerous in AI-agent contexts where LLM output or config values reach this sink"
+severity: CRITICAL
+phase: 1
+tags: [injection, shell, ai-agent, llm, cwe-78]
+
+# Strategy: flag any non-literal command passed to subprocess with shell=True.
+#
+# The existing CMD-INJECT rule covers taint from web_inputs (request.*, sys.argv, …).
+# This rule complements it by covering AI-agent-specific sources: LLM-generated
+# strings, config file values, and API responses that are not in the web_inputs
+# vocabulary.  In hermes-agent, exec_cmd originates from ~/.hermes/config.yaml
+# and from /v1/chat/completions API responses — neither of which appear in
+# web_inputs — yet both flow into subprocess.run(shell=True) at cli.py:5035.
+#
+# A constant string literal is never flagged.
+# A list/tuple literal is never flagged (shell=True with a sequence is a no-op).
+# Any other expression (Name, f-string, BinOp, Call, …) is flagged.
+strategy: shell_injection
+shell_injection:
+  module: subprocess
+  functions: [run, call, check_call, check_output, Popen]

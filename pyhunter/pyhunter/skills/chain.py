@@ -47,11 +47,12 @@ def _build_user_prompt(steps: List[Finding]) -> str:
             entry += f"   Taint path: {_format_taint_path(f.taint_path)}\n"
         if f.sanitized and f.sanitizer:
             entry += f"   Sanitizer: {f.sanitizer} applied (bypass risk exists)\n"
-        if f.taint_assessment:
+        if f.taint_analysis and f.taint_analysis.assessment:
             # Include chain-potential paragraph only (last section of the assessment)
-            chain_idx = f.taint_assessment.find("### Chain Potential")
+            assessment = f.taint_analysis.assessment
+            chain_idx = assessment.find("### Chain Potential")
             if chain_idx != -1:
-                entry += f"   Chain potential: {f.taint_assessment[chain_idx + 19:].strip()[:300]}\n"
+                entry += f"   Chain potential: {assessment[chain_idx + 19:].strip()[:300]}\n"
         lines.append(entry)
     return "\n".join(lines)
 

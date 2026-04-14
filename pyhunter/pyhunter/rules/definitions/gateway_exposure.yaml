@@ -1,0 +1,26 @@
+id: GATEWAY-EXPOSURE
+description: "HTTP/socket server bound to 0.0.0.0 — exposes the service to all network interfaces; critical when authentication is absent or optional"
+severity: HIGH
+phase: 1
+tags: [exposure, network, ai-agent, gateway, authentication, cwe-306]
+
+# Strategy: detect server-start or socket-bind calls that use 0.0.0.0 or the
+# empty string as the host — both bind to all available network interfaces.
+#
+# AI-agent gateways (hermes-agent port 8642, Open-WebUI, LM Studio, etc.) bind
+# to 0.0.0.0 by default and ship with API_SERVER_KEY unset.  Any host with
+# network access to the port can deliver prompt-injection payloads to the agent.
+# Combined with AGENT-SHELL or RCE-EXEC-COMPILE this achieves unauthenticated
+# remote in-process RCE (CHAIN-001).
+#
+# Flagged patterns:
+#   app.run(host='0.0.0.0', ...)          Flask
+#   uvicorn.run(app, host='0.0.0.0', ...) ASGI / FastAPI
+#   serve(app, host='0.0.0.0', ...)       waitress / gunicorn
+#   sock.bind(('0.0.0.0', port))          raw socket
+#   HTTPServer(('0.0.0.0', port), ...)    stdlib http.server
+#   make_server('0.0.0.0', ...)           wsgiref
+strategy: gateway_exposure
+gateway_exposure:
+  host_kwarg_functions: [run, serve, start, listen, make_server, create_server]
+  all_interface_values: ["0.0.0.0", ""]

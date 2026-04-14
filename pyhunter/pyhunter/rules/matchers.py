@@ -743,3 +743,263 @@ class SaveHeuristicMatcher(Matcher):
                     )
 
         return findings
+
+
+# ── ShellInjectionMatcher ─────────────────────────────────────────────────────
+
+class ShellInjectionMatcher(Matcher):
+    """Flag subprocess calls with shell=True where the command is not a literal.
+
+    The existing TaintMatcher/CMD-INJECT rule covers taint from web_inputs.
+    This matcher targets the complementary case: any non-literal value passed
+    to a subprocess sink with shell=True.  In AI-agent frameworks the command
+    string often originates from LLM output, configuration files, or API
+    responses — none of which appear in the web_inputs vocabulary.
+
+    A constant string (``"ls -la"``) is never flagged — no injection is
+    possible.  A list or tuple literal is never flagged — shell=True with a
+    sequence is a no-op.  Any other expression (Name, f-string, BinOp, Call,
+    …) is flagged as a potential injection sink.
+    """
+
+    _SAFE_TYPES = (ast.Constant, ast.List, ast.Tuple)
+
+    def __init__(self, cfg: Dict[str, Any]) -> None:
+        self._module:    str      = cfg.get("module", "subprocess")
+        self._functions: set[str] = set(cfg.get("functions", [
+            "run", "call", "check_call", "check_output", "Popen",
+        ]))
+
+    def _is_subprocess_sink(self, call: ast.Call) -> bool:
+        func = call.func
+        if not isinstance(func, ast.Attribute):
+            return False
+        if func.attr not in self._functions:
+            return False
+        chain = _attr_chain(func.value)
+        return bool(chain) and chain[-1] == self._module
+
+    def _cmd_arg(self, call: ast.Call) -> Optional[ast.expr]:
+        """Return the command argument node, checking positional arg then 'args=' kwarg."""
+        if call.args:
+            return call.args[0]
+        for kw in call.keywords:
+            if kw.arg == "args":
+                return kw.value
+        return None
+
+    def match(self, tree, source_lines, filepath, rule) -> List[Finding]:
+        findings: List[Finding] = []
+        seen: set[int] = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and node.lineno not in seen
+                and self._is_subprocess_sink(node)
+                and _has_shell_true(node)
+            ):
+                cmd = self._cmd_arg(node)
+                if cmd is not None and not isinstance(cmd, self._SAFE_TYPES):
+                    seen.add(node.lineno)
+                    func_name = node.func.attr  # type: ignore[union-attr]
+                    findings.append(
+                        self._finding(
+                            rule, filepath, source_lines, node.lineno,
+                            f"{self._module}.{func_name}(shell=True)",
+                        )
+                    )
+        return findings
+
+
+# ── CompoundExecMatcher ───────────────────────────────────────────────────────
+
+class CompoundExecMatcher(Matcher):
+    """Detect exec(compile(open(path).read(), ...)) — file-based dynamic execution.
+
+    This compound pattern is used in AI-agent skill loaders (e.g., hermes-agent
+    ``auto_jailbreak.py``) to execute arbitrary Python files inside the agent's
+    live runtime.  Unlike a bare ``exec()``, this pattern:
+
+      1. Reads source code from an attacker-controllable file path
+      2. Compiles it without integrity verification
+      3. Executes it in-process with full access to the agent's runtime state
+
+    Any attacker who can write to the target path achieves in-process RCE with
+    access to loaded API keys, SSH credentials, environment variables, and every
+    secret visible to the agent process.
+    """
+
+    def __init__(self, cfg: Dict[str, Any]) -> None:  # noqa: D107
+        pass  # no configurable parameters; pattern is fully specified by the matcher
+
+    def _is_file_read(self, node: ast.expr) -> bool:
+        """Return True for ``open(x).read()`` — a direct file-content expression."""
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "read"
+            and isinstance(node.func.value, ast.Call)
+            and isinstance(node.func.value.func, ast.Name)
+            and node.func.value.func.id == "open"
+        )
+
+    def _is_compile_of_file(self, node: ast.expr) -> bool:
+        """Return True for ``compile(open(path).read(), ...)`` calls."""
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "compile"
+            and bool(node.args)
+            and self._is_file_read(node.args[0])
+        )
+
+    def _is_exec_compile_file(self, node: ast.AST) -> bool:
+        """Return True for ``exec(compile(open(path).read(), ...), ...)`` calls."""
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)   # type: ignore[union-attr]
+            and node.func.id == "exec"             # type: ignore[union-attr]
+            and bool(node.args)                    # type: ignore[union-attr]
+            and self._is_compile_of_file(node.args[0])  # type: ignore[union-attr]
+        )
+
+    def match(self, tree, source_lines, filepath, rule) -> List[Finding]:
+        findings: List[Finding] = []
+        seen: set[int] = set()
+        for node in ast.walk(tree):
+            lineno = getattr(node, "lineno", None)
+            if self._is_exec_compile_file(node) and lineno not in seen:
+                seen.add(lineno)
+                findings.append(
+                    self._finding(
+                        rule, filepath, source_lines, lineno,
+                        "exec(compile(open(path).read(), ...))",
+                    )
+                )
+        return findings
+
+
+# ── GatewayExposureMatcher ────────────────────────────────────────────────────
+
+_ALL_INTERFACES: frozenset[str] = frozenset({"0.0.0.0", ""})
+
+_HTTP_SERVER_NAMES: frozenset[str] = frozenset({
+    "HTTPServer", "TCPServer", "UDPServer",
+    "ThreadingHTTPServer", "ThreadingTCPServer",
+})
+
+
+class GatewayExposureMatcher(Matcher):
+    """Detect HTTP/socket servers bound to all network interfaces (0.0.0.0).
+
+    AI-agent gateways (Flask, FastAPI/uvicorn, raw sockets, aiohttp, Tornado,
+    stdlib http.server) default to binding on 0.0.0.0 — exposing themselves to
+    any host with network access.  When combined with missing or optional
+    authentication this enables unauthenticated remote prompt injection.
+
+    Flagged patterns
+    ────────────────
+    ``app.run(host='0.0.0.0', ...)``          Flask
+    ``uvicorn.run(app, host='0.0.0.0', ...)`` ASGI / FastAPI
+    ``serve(app, host='0.0.0.0', ...)``       waitress / gunicorn
+    ``sock.bind(('0.0.0.0', port))``          raw socket
+    ``HTTPServer(('0.0.0.0', port), ...)``    stdlib http.server
+    ``make_server('0.0.0.0', ...)``           wsgiref
+    """
+
+    def __init__(self, cfg: Dict[str, Any]) -> None:
+        self._server_funcs: set[str] = set(cfg.get("host_kwarg_functions", [
+            "run", "serve", "start", "listen", "make_server", "create_server",
+        ]))
+        self._all_ifaces: frozenset[str] = frozenset(
+            cfg.get("all_interface_values", list(_ALL_INTERFACES))
+        )
+
+    def _host_kwarg_value(self, call: ast.Call) -> Optional[str]:
+        """Return the literal ``host=`` kwarg string value, or None."""
+        for kw in call.keywords:
+            if kw.arg == "host" and isinstance(kw.value, ast.Constant):
+                return str(kw.value.value)
+        return None
+
+    def _is_server_call_by_name(self, call: ast.Call) -> bool:
+        func = call.func
+        if isinstance(func, ast.Name):
+            return func.id in self._server_funcs
+        if isinstance(func, ast.Attribute):
+            return func.attr in self._server_funcs
+        return False
+
+    def _is_socket_bind_all(self, call: ast.Call) -> bool:
+        """Return True for ``sock.bind(('0.0.0.0', port))``."""
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "bind"):
+            return False
+        if not call.args:
+            return False
+        addr = call.args[0]
+        if not isinstance(addr, (ast.Tuple, ast.List)) or not addr.elts:
+            return False
+        host_node = addr.elts[0]
+        return (
+            isinstance(host_node, ast.Constant)
+            and str(host_node.value) in self._all_ifaces
+        )
+
+    def _is_http_server_all(self, call: ast.Call) -> bool:
+        """Return True for ``HTTPServer(('0.0.0.0', port), ...)``."""
+        func = call.func
+        name = (
+            func.id    if isinstance(func, ast.Name)
+            else func.attr if isinstance(func, ast.Attribute)
+            else None
+        )
+        if name not in _HTTP_SERVER_NAMES:
+            return False
+        if not call.args:
+            return False
+        addr = call.args[0]
+        if not isinstance(addr, (ast.Tuple, ast.List)) or not addr.elts:
+            return False
+        host_node = addr.elts[0]
+        return (
+            isinstance(host_node, ast.Constant)
+            and str(host_node.value) in self._all_ifaces
+        )
+
+    def _sink_label(self, call: ast.Call) -> Optional[str]:
+        """Return a descriptive label if this call exposes a server to all interfaces."""
+        if self._is_server_call_by_name(call):
+            host = self._host_kwarg_value(call)
+            if host is not None and host in self._all_ifaces:
+                func = call.func
+                name = (
+                    func.id    if isinstance(func, ast.Name)
+                    else func.attr if isinstance(func, ast.Attribute)
+                    else "server"
+                )
+                return f"{name}(host='0.0.0.0')"
+
+        if self._is_socket_bind_all(call):
+            return "socket.bind(('0.0.0.0', port))"
+
+        if self._is_http_server_all(call):
+            func = call.func
+            name = func.id if isinstance(func, ast.Name) else func.attr
+            return f"{name}(('0.0.0.0', port))"
+
+        return None
+
+    def match(self, tree, source_lines, filepath, rule) -> List[Finding]:
+        findings: List[Finding] = []
+        seen: set[int] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or node.lineno in seen:
+                continue
+            label = self._sink_label(node)
+            if label:
+                seen.add(node.lineno)
+                findings.append(
+                    self._finding(rule, filepath, source_lines, node.lineno, label)
+                )
+        return findings

@@ -28,22 +28,28 @@ from pyhunter.rules import BaseRule
 from pyhunter.rules.matchers import (
     AssignTrackMatcher,
     CallMatcher,
+    CompoundExecMatcher,
     DecoratorMatcher,
     FileScopeMatcher,
+    GatewayExposureMatcher,
     Matcher,
     SaveHeuristicMatcher,
+    ShellInjectionMatcher,
     TaintMatcher,
 )
 
 DEFINITIONS_DIR: Path = Path(__file__).parent / "definitions"
 
 _STRATEGY_MAP: Dict[str, type[Matcher]] = {
-    "call":           CallMatcher,
-    "taint":          TaintMatcher,
-    "assign_track":   AssignTrackMatcher,
-    "decorator":      DecoratorMatcher,
-    "file_scope":     FileScopeMatcher,
-    "save_heuristic": SaveHeuristicMatcher,
+    "call":             CallMatcher,
+    "taint":            TaintMatcher,
+    "assign_track":     AssignTrackMatcher,
+    "decorator":        DecoratorMatcher,
+    "file_scope":       FileScopeMatcher,
+    "save_heuristic":   SaveHeuristicMatcher,
+    "shell_injection":  ShellInjectionMatcher,
+    "compound_exec":    CompoundExecMatcher,
+    "gateway_exposure": GatewayExposureMatcher,
 }
 
 # Strategies that need the sources vocabulary as a second constructor arg

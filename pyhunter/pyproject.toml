@@ -44,6 +44,10 @@ pyhunter = "pyhunter.cli:main"
 where = ["."]
 include = ["pyhunter*"]
 
+[tool.setuptools.package-data]
+"pyhunter.rules.definitions" = ["*.yaml"]
+"pyhunter.skills.prompts"    = ["*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"

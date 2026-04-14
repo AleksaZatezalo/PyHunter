@@ -1,0 +1,21 @@
+id: RCE-EXEC-COMPILE
+description: "exec(compile(open(path).read(), ...)) — unconditional file-based in-process RCE; used in AI-agent skill loaders"
+severity: CRITICAL
+phase: 2
+tags: [rce, exec, compile, ai-agent, skill-loader, cwe-94]
+
+# Strategy: detect the three-level nesting exec → compile → open().read().
+#
+# This pattern is qualitatively worse than a bare exec(): it reads attacker-
+# controllable file content, compiles it without integrity verification, and
+# executes it in-process — giving the payload full access to the agent runtime,
+# including loaded API keys, SSH credentials, and environment variables.
+#
+# In hermes-agent auto_jailbreak.py:52 this fires unconditionally at module-load
+# time.  Any attacker who can write to _parseltongue_path (achievable via the
+# subprocess.run(shell=True) sink in cli.py) gets in-process RCE.
+#
+# The compound_exec strategy has no configurable parameters; the pattern it
+# detects is fully specified by the matcher itself.
+strategy: compound_exec
+compound_exec: {}

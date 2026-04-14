@@ -298,3 +298,222 @@ def load_model():
         tree, lines = _parse(src)
         findings = self.rule.check(tree, lines, "app.py")
         assert findings == []
+
+
+# ── AGENT-SHELL ───────────────────────────────────────────────────────────────
+
+class TestAgentShell:
+    rule = _RULES["AGENT-SHELL"]
+
+    def test_detects_variable_command_shell_true(self):
+        # hermes-agent cli.py:5035 pattern — exec_cmd from config
+        src = """\
+import subprocess
+def run_cmd(exec_cmd):
+    subprocess.run(exec_cmd, shell=True)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "cli.py")
+        assert len(findings) == 1
+        assert "shell=True" in findings[0].sink
+
+    def test_detects_config_derived_command(self):
+        src = """\
+import subprocess
+def execute(config):
+    cmd = config.get("command", "")
+    subprocess.run(cmd, shell=True, capture_output=True, timeout=30)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "cli.py")
+        assert len(findings) == 1
+
+    def test_detects_popen_shell_true(self):
+        src = """\
+import subprocess
+def run_cmd(llm_output):
+    proc = subprocess.Popen(llm_output, shell=True)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "agent.py")
+        assert len(findings) == 1
+        assert "Popen" in findings[0].sink
+
+    def test_detects_fstring_command(self):
+        src = """\
+import subprocess
+def run(user_cmd):
+    subprocess.run(f"echo {user_cmd}", shell=True)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "app.py")
+        assert len(findings) == 1
+
+    def test_literal_command_not_flagged(self):
+        src = """\
+import subprocess
+subprocess.run("ls -la", shell=True)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "cli.py")
+        assert findings == []
+
+    def test_list_command_not_flagged(self):
+        # List form with shell=True is a no-op — first element is the program
+        src = """\
+import subprocess
+subprocess.run(["ls", "-la"], shell=True)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "cli.py")
+        assert findings == []
+
+    def test_no_shell_true_not_flagged(self):
+        src = """\
+import subprocess
+from flask import request
+def run():
+    cmd = request.args.get("cmd")
+    subprocess.run(["ls", cmd])
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "cli.py")
+        assert findings == []
+
+
+# ── RCE-EXEC-COMPILE ─────────────────────────────────────────────────────────
+
+class TestRCEExecCompile:
+    rule = _RULES["RCE-EXEC-COMPILE"]
+
+    def test_detects_exec_compile_open_read(self):
+        # Exact hermes-agent auto_jailbreak.py:52 pattern
+        src = """\
+exec(
+    compile(
+        open(_parseltongue_path).read(),
+        str(_parseltongue_path),
+        "exec",
+    ),
+    _caller_globals,
+)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "auto_jailbreak.py")
+        assert len(findings) == 1
+        assert "exec(compile(open" in findings[0].sink
+
+    def test_detects_inline_form(self):
+        src = "exec(compile(open(path).read(), path, 'exec'))"
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "loader.py")
+        assert len(findings) == 1
+
+    def test_bare_exec_not_flagged(self):
+        # Bare exec is caught by RCE-EVAL; this rule is for the compound form
+        src = "exec(user_code)"
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "app.py")
+        assert findings == []
+
+    def test_exec_compile_string_literal_not_flagged(self):
+        # compile() of a string literal — no file read, not this pattern
+        src = "exec(compile('x = 1', '<string>', 'exec'))"
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "app.py")
+        assert findings == []
+
+    def test_detects_inside_function(self):
+        src = """\
+def load_skill(path):
+    exec(compile(open(path).read(), path, "exec"), globals())
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "skills.py")
+        assert len(findings) == 1
+
+
+# ── GATEWAY-EXPOSURE ──────────────────────────────────────────────────────────
+
+class TestGatewayExposure:
+    rule = _RULES["GATEWAY-EXPOSURE"]
+
+    def test_detects_flask_run_all_interfaces(self):
+        src = """\
+from flask import Flask
+app = Flask(__name__)
+app.run(host='0.0.0.0', port=8642)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "server.py")
+        assert len(findings) == 1
+        assert "0.0.0.0" in findings[0].sink
+
+    def test_detects_uvicorn_run_all_interfaces(self):
+        src = """\
+import uvicorn
+uvicorn.run(app, host='0.0.0.0', port=8000)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "main.py")
+        assert len(findings) == 1
+
+    def test_detects_socket_bind_all_interfaces(self):
+        src = """\
+import socket
+s = socket.socket()
+s.bind(('0.0.0.0', 8642))
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "gateway.py")
+        assert len(findings) == 1
+        assert "socket.bind" in findings[0].sink
+
+    def test_detects_http_server_all_interfaces(self):
+        src = """\
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+server = HTTPServer(('0.0.0.0', 8080), SimpleHTTPRequestHandler)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "server.py")
+        assert len(findings) == 1
+        assert "HTTPServer" in findings[0].sink
+
+    def test_detects_empty_host_all_interfaces(self):
+        # Empty string also binds to all interfaces
+        src = """\
+import uvicorn
+uvicorn.run(app, host='', port=8000)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "main.py")
+        assert len(findings) == 1
+
+    def test_localhost_not_flagged(self):
+        src = """\
+import uvicorn
+uvicorn.run(app, host='127.0.0.1', port=8000)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "main.py")
+        assert findings == []
+
+    def test_flask_localhost_not_flagged(self):
+        src = """\
+from flask import Flask
+app = Flask(__name__)
+app.run(host='localhost', port=5000)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "app.py")
+        assert findings == []
+
+    def test_no_host_kwarg_not_flagged(self):
+        # run() without an explicit host= does not trigger the rule
+        src = """\
+import uvicorn
+uvicorn.run(app, port=8000)
+"""
+        tree, lines = _parse(src)
+        findings = self.rule.check(tree, lines, "main.py")
+        assert findings == []
