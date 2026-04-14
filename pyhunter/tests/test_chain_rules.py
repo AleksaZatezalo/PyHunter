@@ -1,21 +1,22 @@
-"""Tests for RCE, cmd injection, and file upload rules across Flask, Django, FastAPI, Tornado."""
+"""Tests for DESER-RCE, CMD-INJECT, and FILE-UPLOAD across Flask, Django, FastAPI, Tornado."""
 
 import ast
+
 import pytest
 
-from pyhunter.rules.deser_rce       import DeserRCERule
-from pyhunter.rules.cmd_injection   import CommandInjectionRule as CmdInjectRule
-from pyhunter.rules.file_upload_rce import FileUploadRCERule
+from pyhunter.rules.registry import all_rules
+
+_RULES = {r.rule_id: r for r in all_rules()}
 
 
 def _p(src: str):
     return ast.parse(src), src.splitlines()
 
 
-# ── Rule 02: DESER-RCE ────────────────────────────────────────────────────────
+# ── DESER-RCE ─────────────────────────────────────────────────────────────────
 
 class TestDeserRCE:
-    r = DeserRCERule()
+    r = _RULES["DESER-RCE"]
 
     def test_pickle_loads_flask_body(self):
         src = """\
@@ -77,10 +78,10 @@ def load():
         assert len(f) >= 1
 
 
-# ── Rule 03: CMD-INJECT ───────────────────────────────────────────────────────
+# ── CMD-INJECT ────────────────────────────────────────────────────────────────
 
 class TestCmdInject:
-    r = CmdInjectRule()
+    r = _RULES["CMD-INJECT"]
 
     def test_os_system_flask(self):
         src = """\
@@ -136,10 +137,10 @@ async def run(cmd: str = Query(...)):
         assert len(f) >= 1
 
 
-# ── Rule 05: FILE-UPLOAD-RCE ──────────────────────────────────────────────────
+# ── FILE-UPLOAD ───────────────────────────────────────────────────────────────
 
 class TestFileUploadRCE:
-    r = FileUploadRCERule()
+    r = _RULES["FILE-UPLOAD"]
 
     def test_flask_file_save_user_path(self):
         src = """\

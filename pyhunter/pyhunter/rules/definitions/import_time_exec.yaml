@@ -1,0 +1,14 @@
+id: RCE-IMPORT
+description: "Dangerous code executed at import time"
+severity: HIGH
+phase: 3
+tags: [supply-chain, import, exec]
+
+# Strategy: file-scoped pattern matching.
+# Only runs on __init__.py and setup.py — files whose top-level statements
+# execute at import / install time.  Flags any call to a dangerous function
+# name found at module scope (i.e. not inside a def or class).
+strategy: file_scope
+file_scope:
+  filenames: [__init__.py, setup.py]
+  danger_call_names: [eval, exec, compile, system, popen, Popen]

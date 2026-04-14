@@ -1,0 +1,71 @@
+# Shared taint-source vocabulary.
+#
+# Rules reference a vocabulary key (e.g. sources: web_inputs) to indicate
+# which user-controlled input patterns they care about.  Centralising this
+# here means adding a new framework requires changing one file.
+
+web_inputs:
+
+  # ── Attribute chains that yield user-controlled data ───────────────────────
+  chains:
+    # Flask / Werkzeug
+    - [request, args]
+    - [request, form]
+    - [request, json]
+    - [request, data]
+    - [request, files]
+    - [request, values]
+    - [request, headers]
+    - [request, cookies]
+    # Django / Django REST Framework
+    - [request, GET]
+    - [request, POST]
+    - [request, body]
+    - [request, FILES]
+    - [request, META]
+    - [request, COOKIES]
+    - [request, query_params]
+    # Starlette / FastAPI
+    - [request, path_params]
+    # Tornado RequestHandler (self.request.*)
+    - [self, request, body]
+    - [self, request, arguments]
+    - [self, request, body_arguments]
+    - [self, request, query_arguments]
+    - [self, request, files]
+    # CLI / environment
+    - [sys, argv]
+    - [os, environ]
+
+  # ── Method names that return user-controlled data ───────────────────────────
+  # Matched when called on request / self / os objects.
+  source_methods:
+    - get
+    - get_json
+    - get_data
+    - getlist
+    - getfirst
+    - get_argument
+    - get_query_argument
+    - get_body_argument
+    - get_arguments
+    - body
+    - json
+    - form
+    - stream
+    - getenv
+
+  # ── Standalone functions that return user-controlled data ───────────────────
+  source_functions:
+    - input
+
+  # ── FastAPI dependency-injection annotations ────────────────────────────────
+  # Parameters annotated with these are treated as tainted.
+  fastapi_annotations:
+    - Query
+    - Path
+    - Body
+    - Form
+    - File
+    - Header
+    - Cookie

@@ -1,0 +1,36 @@
+id: PICKLE-NET
+description: "Pickle deserialization of network-received data"
+severity: CRITICAL
+phase: 1
+tags: [pickle, network, deserialization]
+
+# Strategy: assignment-tracking — find variables assigned from network recv
+# calls and flag them when passed to a pickle deserialiser.
+# Also flags inline patterns: pickle.loads(sock.recv(...)).
+strategy: assign_track
+assign_track:
+  # Socket / stream methods that return raw bytes from the network
+  network_recv_methods:
+    - recv
+    - recvfrom
+    - recvfrom_into
+    - recv_into
+    - read
+    - readline
+    - makefile
+  # HTTP response attributes that expose raw bytes
+  http_body_attrs:
+    - content
+    - raw
+    - data
+  # HTTP response methods that return raw bytes
+  http_body_methods:
+    - read
+    - iter_content
+    - iter_lines
+  # Deserialisation sinks that execute code on untrusted bytes
+  sink_pairs:
+    - {module: pickle, function: loads}
+    - {module: pickle, function: load}
+    - {module: dill,   function: loads}
+    - {module: dill,   function: load}

@@ -28,15 +28,31 @@ Respond with ONLY a JSON object. No markdown fences, no prose outside the JSON:
 """
 
 
+def _format_taint_path(taint_path: list[dict]) -> str:
+    return " → ".join(
+        f"`{s['variable']}`(L{s['line']})" for s in taint_path
+    )
+
+
 def _build_user_prompt(steps: List[Finding]) -> str:
     lines = ["Confirmed vulnerabilities (suggested chain order):\n"]
     for i, f in enumerate(steps, 1):
         analysis = f.analysis or "confirmed exploitable"
-        lines.append(
+        entry = (
             f"{i}. [{f.severity.value}] {f.rule_id}  {f.file}:{f.line}\n"
             f"   Sink: {f.sink or '?'}  |  Source: {f.source or 'unknown'}\n"
             f"   Analysis: {analysis}\n"
         )
+        if f.taint_path:
+            entry += f"   Taint path: {_format_taint_path(f.taint_path)}\n"
+        if f.sanitized and f.sanitizer:
+            entry += f"   Sanitizer: {f.sanitizer} applied (bypass risk exists)\n"
+        if f.taint_assessment:
+            # Include chain-potential paragraph only (last section of the assessment)
+            chain_idx = f.taint_assessment.find("### Chain Potential")
+            if chain_idx != -1:
+                entry += f"   Chain potential: {f.taint_assessment[chain_idx + 19:].strip()[:300]}\n"
+        lines.append(entry)
     return "\n".join(lines)
 
 

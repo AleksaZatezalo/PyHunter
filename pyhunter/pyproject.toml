@@ -24,6 +24,7 @@ classifiers = [
 dependencies = [
     "anthropic>=0.25.0",
     "click>=8.1",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +32,6 @@ dev = [
     "pytest>=7.4",
     "pytest-cov",
     "flask",        # needed to run examples/vulnerable_app.py
-    "pyyaml",
 ]
 github = [
     "PyGithub>=2.0",

@@ -1,21 +1,48 @@
-"""Intra-procedural taint-tracking engine.
+"""Intra-procedural taint-tracking engine (legacy linear analysis).
 
 Design pattern: Visitor
   TaintEngine.analyze() visits every function in an AST and, for each one,
   walks its statement list in linear order to propagate taint from sources
-  to sinks.  The engine produces TaintFlow records that the Scanner merges
-  back into rule-generated findings.
+  to sinks.  The engine produces TaintFlow records.
 
 Taint model:
-  Sources — user-controlled inputs: request.*, sys.argv, os.environ, input()
-  Sinks   — dangerous call sites: eval, exec, open, os.system, subprocess.*,
-            pickle.loads, yaml.load
+  Sources    — user-controlled inputs: request.*, sys.argv, os.environ, input()
+  Sinks      — dangerous call sites: eval, exec, open, os.system, subprocess.*,
+               pickle.loads, yaml.load
+  Sanitizers — functions that neutralise taint: shlex.quote, html.escape,
+               re.escape, bleach.clean, markupsafe.escape, etc.
+               Sanitized taint is still tracked so bypass risk can be assessed.
+
+The legacy TaintEngine / TaintFlow / TaintStep names are preserved for
+backward compatibility with test_taint.py and any external callers.
+
+New CFG-based analysis: see taint/cfg.py + taint/analysis.py.
+Public facade: CFGAnalyzer (defined at the bottom of this module).
 """
 from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
-from typing import Generator, List, Set
+from typing import Generator, List, Optional, Set
+
+# Shared AST helpers and tables live in _helpers.py to avoid circular imports
+# between this module and cfg.py (which also needs them).
+from pyhunter.taint._helpers import (
+    _SANITIZER_KEYS, _SINKS, _SOURCE_CALLS, _SOURCE_CHAINS, _SOURCE_METHODS,
+    _attr_chain, _call_arg_names, _call_key, _is_source, _is_tainted,
+    _names, _source_desc, _unpack_names,
+)
+
+
+# ── Legacy dataclasses (backward-compatible) ──────────────────────────────────
+
+@dataclass
+class TaintStep:
+    """One hop in a taint propagation path from source to sink."""
+
+    line:        int
+    variable:    str
+    description: str
 
 
 @dataclass
@@ -29,113 +56,15 @@ class TaintFlow:
     sink_line:     int
     tainted_vars:  List[str] = field(default_factory=list)
     function_name: str = ""
+    path:          List[TaintStep] = field(default_factory=list)
+    sanitized:     bool            = False
+    sanitizer:     Optional[str]   = None
 
 
-# ── Source / sink tables ──────────────────────────────────────────────────────
-# Kept self-contained to avoid an upward dependency on pyhunter.rules.
+# ── AST helpers (kept as module-level names for backward compat) ──────────────
 
-_SOURCE_CHAINS: set[tuple[str, ...]] = {
-    # Flask
-    ("request", "args"),    ("request", "form"),    ("request", "json"),
-    ("request", "data"),    ("request", "files"),   ("request", "values"),
-    ("request", "headers"), ("request", "cookies"),
-    # Django / DRF
-    ("request", "GET"),     ("request", "POST"),    ("request", "body"),
-    ("request", "FILES"),   ("request", "META"),    ("request", "COOKIES"),
-    ("request", "query_params"),
-    # Tornado
-    ("self", "request", "body"),
-    ("self", "request", "arguments"),
-    ("self", "request", "body_arguments"),
-    ("self", "request", "query_arguments"),
-    ("self", "request", "files"),
-    # Starlette
-    ("request", "query_params"), ("request", "path_params"),
-    # CLI / environment
-    ("sys", "argv"),
-    ("os",  "environ"),
-}
-
-_SOURCE_CALLS   = {"input"}
-_SOURCE_METHODS = {
-    "get", "get_json", "get_data", "getlist", "getfirst",
-    "get_argument", "get_query_argument", "get_body_argument", "get_arguments",
-    "body", "json", "form", "stream", "getenv",
-}
-
-_SINKS: set[tuple[str | None, str]] = {
-    (None,         "eval"),
-    (None,         "exec"),
-    (None,         "compile"),
-    (None,         "open"),
-    ("os",         "system"),
-    ("os",         "popen"),
-    ("subprocess", "run"),
-    ("subprocess", "call"),
-    ("subprocess", "Popen"),
-    ("pickle",     "loads"),
-    ("pickle",     "load"),
-    ("yaml",       "load"),
-}
-
-
-# ── AST helpers ───────────────────────────────────────────────────────────────
-
-def _attr_chain(node: ast.expr) -> tuple[str, ...]:
-    parts: list[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-        return tuple(reversed(parts))
-    return ()
-
-
-def _is_source(node: ast.expr) -> bool:
-    chain = _attr_chain(node)
-    if chain and any(chain[: len(s)] == s for s in _SOURCE_CHAINS):
-        return True
-    if isinstance(node, ast.Subscript) and _is_source(node.value):
-        return True
-    if isinstance(node, ast.Call):
-        func = node.func
-        if isinstance(func, ast.Name) and func.id in _SOURCE_CALLS:
-            return True
-        if isinstance(func, ast.Attribute) and func.attr in _SOURCE_METHODS:
-            obj = _attr_chain(func.value)
-            if obj and obj[0] in ("request", "self", "os"):
-                return True
-    return False
-
-
-def _names(node: ast.expr) -> Set[str]:
-    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
-
-
-def _is_tainted(expr: ast.expr, tainted: dict) -> bool:
-    return _is_source(expr) or bool(_names(expr) & tainted.keys())
-
-
-def _source_desc(expr: ast.expr, tainted: dict) -> tuple[int | None, str]:
-    if _is_source(expr):
-        chain = _attr_chain(expr)
-        return None, ".".join(chain) if chain else "user input"
-    for name in _names(expr) & tainted.keys():
-        return tainted[name]
-    return None, "unknown"
-
-
-def _sink_key(call: ast.Call) -> tuple[str | None, str] | None:
-    if isinstance(call.func, ast.Name):
-        return (None, call.func.id)
-    if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
-        return (call.func.value.id, call.func.attr)
-    return None
-
-
-def _unpack_names(target: ast.expr) -> list[str]:
-    return [n.id for n in ast.walk(target) if isinstance(n, ast.Name)]
+# Backward-compatible alias used by Scanner
+_sink_key = _call_key
 
 
 def _walk_stmts(stmts: list[ast.stmt]) -> Generator[ast.stmt, None, None]:
@@ -146,13 +75,13 @@ def _walk_stmts(stmts: list[ast.stmt]) -> Generator[ast.stmt, None, None]:
                 yield child
 
 
-# ── Visitor ───────────────────────────────────────────────────────────────────
+# ── Legacy TaintEngine ────────────────────────────────────────────────────────
 
 class TaintEngine:
-    """Visitor that walks every function in an AST and records taint flows.
+    """Legacy visitor: walks every function in an AST and records taint flows.
 
-    Called once per file by the Scanner; its TaintFlow results are merged back
-    into rule-generated findings to populate ``Finding.source``.
+    Retained unchanged for test_taint.py backward compatibility.
+    New code should use CFGAnalyzer instead.
     """
 
     def analyze(self, tree: ast.AST, source_lines: list[str], filepath: str) -> List[TaintFlow]:
@@ -167,39 +96,107 @@ class TaintEngine:
         func: ast.FunctionDef | ast.AsyncFunctionDef,
         filepath: str,
     ) -> List[TaintFlow]:
-        # tainted maps variable name → (source_line, source_description)
         tainted: dict[str, tuple[int, str]] = {}
-        flows:   List[TaintFlow]            = []
+        taint_path: dict[str, list[TaintStep]] = {}
+        sanitized_vars: dict[str, str] = {}
+        flows: List[TaintFlow] = []
 
         for stmt in _walk_stmts(func.body):
+
+            # ── Sanitizer application: z = shlex.quote(x) ────────────────────
+            if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
+                san_key = _call_key(stmt.value)
+                if san_key in _SANITIZER_KEYS:
+                    arg_names    = _call_arg_names(stmt.value)
+                    tainted_args = arg_names & tainted.keys()
+                    if tainted_args:
+                        san_name = (
+                            f"{san_key[0]}.{san_key[1]}" if san_key[0] else san_key[1]
+                        )
+                        best = min(tainted_args, key=lambda n: tainted[n][0] or 0)
+                        src_line, src_desc = tainted[best]
+                        prev_path = list(taint_path.get(best, []))
+                        for target in stmt.targets:
+                            for name in _unpack_names(target):
+                                tainted[name]        = (src_line, src_desc)
+                                sanitized_vars[name] = san_name
+                                taint_path[name]     = prev_path + [
+                                    TaintStep(
+                                        stmt.lineno, name,
+                                        f"sanitized by {san_name}() → `{name}`",
+                                    )
+                                ]
+                        continue
+
+            # ── Normal assignment: x = <tainted expr> ────────────────────────
             if isinstance(stmt, ast.Assign) and _is_tainted(stmt.value, tainted):
-                src_line, src_desc = _source_desc(stmt.value, tainted)
+                src_line, src_desc2 = _source_desc(stmt.value, tainted)
                 for target in stmt.targets:
                     for name in _unpack_names(target):
-                        tainted[name] = (src_line or stmt.lineno, src_desc)
+                        tainted[name] = (src_line or stmt.lineno, src_desc2)
+                        if _is_source(stmt.value):
+                            taint_path[name] = [
+                                TaintStep(
+                                    stmt.lineno, name,
+                                    f"assigned from {src_desc2}",
+                                )
+                            ]
+                        else:
+                            prev_names = _names(stmt.value) & tainted.keys()
+                            best_prev  = (
+                                min(prev_names, key=lambda n: tainted[n][0] or 0)
+                                if prev_names else None
+                            )
+                            prev_path  = list(taint_path.get(best_prev, [])) if best_prev else []
+                            taint_path[name] = prev_path + [
+                                TaintStep(stmt.lineno, name, f"propagated to `{name}`")
+                            ]
                 if isinstance(stmt.value, ast.Call):
-                    flow = self._check_sink(stmt.value, tainted, func.name, filepath)
+                    flow = self._check_sink(
+                        stmt.value, tainted, taint_path, sanitized_vars,
+                        func.name, filepath,
+                    )
                     if flow:
                         flows.append(flow)
 
             elif isinstance(stmt, ast.AnnAssign) and stmt.value and _is_tainted(stmt.value, tainted):
-                src_line, src_desc = _source_desc(stmt.value, tainted)
+                src_line, src_desc2 = _source_desc(stmt.value, tainted)
                 for name in _unpack_names(stmt.target):
-                    tainted[name] = (src_line or stmt.lineno, src_desc)
+                    tainted[name] = (src_line or stmt.lineno, src_desc2)
+                    prev_names = _names(stmt.value) & tainted.keys()
+                    best_prev  = (
+                        min(prev_names, key=lambda n: tainted[n][0] or 0)
+                        if prev_names else None
+                    )
+                    prev_path  = list(taint_path.get(best_prev, [])) if best_prev else []
+                    taint_path[name] = prev_path + [
+                        TaintStep(stmt.lineno, name, f"annotated assignment to `{name}`")
+                    ]
 
             elif (isinstance(stmt, ast.AugAssign)
                   and _is_tainted(stmt.value, tainted)
                   and isinstance(stmt.target, ast.Name)):
-                src_line, src_desc = _source_desc(stmt.value, tainted)
-                tainted[stmt.target.id] = (src_line or stmt.lineno, src_desc)
+                src_line, src_desc2 = _source_desc(stmt.value, tainted)
+                name      = stmt.target.id
+                prev_path = list(taint_path.get(name, []))
+                tainted[name]    = (src_line or stmt.lineno, src_desc2)
+                taint_path[name] = prev_path + [
+                    TaintStep(stmt.lineno, name, f"augmented assignment to `{name}`")
+                ]
 
             elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-                flow = self._check_sink(stmt.value, tainted, func.name, filepath)
+                flow = self._check_sink(
+                    stmt.value, tainted, taint_path, sanitized_vars,
+                    func.name, filepath,
+                )
                 if flow:
                     flows.append(flow)
 
             elif isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Call):
-                flow = self._check_sink(stmt.value, tainted, func.name, filepath)
+                flow = self._check_sink(
+                    stmt.value, tainted, taint_path, sanitized_vars,
+                    func.name, filepath,
+                )
                 if flow:
                     flows.append(flow)
 
@@ -207,35 +204,79 @@ class TaintEngine:
 
     def _check_sink(
         self,
-        call:      ast.Call,
-        tainted:   dict,
-        func_name: str,
-        filepath:  str,
+        call:           ast.Call,
+        tainted:        dict,
+        taint_path:     dict,
+        sanitized_vars: dict,
+        func_name:      str,
+        filepath:       str,
     ) -> TaintFlow | None:
-        key = _sink_key(call)
+        key = _call_key(call)
         if key not in _SINKS:
             return None
 
-        arg_names: Set[str] = set()
-        for arg in call.args:
-            arg_names |= _names(arg)
-        for kw in call.keywords:
-            arg_names |= _names(kw.value)
-
+        arg_names    = _call_arg_names(call)
         tainted_args = arg_names & tainted.keys()
         if not tainted_args:
             return None
 
-        src_line, src_desc = min(
-            (tainted[n] for n in tainted_args), key=lambda t: t[0] or 0
-        )
+        best = min(tainted_args, key=lambda n: tainted[n][0] or 0)
+        src_line, src_desc2 = tainted[best]
+
         module, name = key
+        sink_str = f"{module}.{name}" if module else name
+
+        path = list(taint_path.get(best, []))
+        path.append(TaintStep(call.lineno, sink_str, f"reaches sink {sink_str}()"))
+
+        san_args     = tainted_args & sanitized_vars.keys()
+        is_sanitized = bool(san_args)
+        sanitizer    = sanitized_vars.get(next(iter(san_args))) if san_args else None
+
         return TaintFlow(
-            source_expr=src_desc,
-            sink=f"{module}.{name}" if module else name,
+            source_expr=src_desc2,
+            sink=sink_str,
             file=filepath,
             source_line=src_line or call.lineno,
             sink_line=call.lineno,
             tainted_vars=sorted(tainted_args),
             function_name=func_name,
+            path=path,
+            sanitized=is_sanitized,
+            sanitizer=sanitizer,
         )
+
+
+# ── New CFG-based API ─────────────────────────────────────────────────────────
+# Imported after the legacy code to avoid circular imports.
+
+from pyhunter.taint.cfg      import build_function_ir   # noqa: E402
+from pyhunter.taint.analysis import analyze_function    # noqa: E402
+from pyhunter.taint.types    import (                   # noqa: E402
+    PathStep, SourceLocation, StepKind, TaintAnalysis, TaintPath,
+)
+
+
+class CFGAnalyzer:
+    """High-level facade for the CFG-based taint analysis.
+
+    Mirrors TaintEngine's interface so the Scanner can swap implementations
+    without changing call sites.
+    """
+
+    def analyze_function(self, func_node, filepath: str, rule_id: str = "") -> List[TaintPath]:
+        """Build FunctionIR and run worklist analysis; return List[TaintPath]."""
+        func_ir = build_function_ir(func_node, filepath)
+        return analyze_function(func_ir, rule_id)
+
+    def find_enclosing_function(self, tree, lineno: int):
+        """Return the innermost FunctionDef that contains *lineno*, or None."""
+        best = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                start = node.lineno
+                end   = getattr(node, "end_lineno", start + 1000)
+                if start <= lineno <= end:
+                    if best is None or node.lineno > best.lineno:
+                        best = node
+        return best

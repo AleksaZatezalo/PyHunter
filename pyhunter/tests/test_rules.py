@@ -1,25 +1,30 @@
-"""Unit tests for all AST-based detection rules (no LLM calls)."""
+"""Unit tests for all YAML-defined AST detection rules (no LLM calls).
+
+Rules are loaded from rules/definitions/*.yaml via all_rules().  Tests are
+grouped by rule ID and structured as:
+  - positive cases — the rule fires on code it should detect
+  - negative cases — the rule does NOT fire on safe code (no false positives)
+"""
 
 import ast
+
 import pytest
 
-from pyhunter.rules.rce_eval         import DynamicCodeExecutionRule
-from pyhunter.rules.cmd_injection     import CommandInjectionRule
-from pyhunter.rules.import_time_exec  import ImportTimeExecRule
-from pyhunter.rules.build_rce         import BuildInstallRCERule
-from pyhunter.rules.web_flow          import WebInputFlowRule
-from pyhunter.rules.decorator_exec    import DecoratorExecutionRule
-from pyhunter.rules.pickle_socket     import PickleOverSocketRule
+from pyhunter.rules.registry import all_rules
 
 
 def _parse(src: str):
     return ast.parse(src), src.splitlines()
 
 
-# ── RCE eval ──────────────────────────────────────────────────────────────────
+# Build a lookup once so each test class can reference rules by ID
+_RULES = {r.rule_id: r for r in all_rules()}
 
-class TestDynamicCodeExecutionRule:
-    rule = DynamicCodeExecutionRule()
+
+# ── RCE-EVAL ──────────────────────────────────────────────────────────────────
+
+class TestRCEEval:
+    rule = _RULES["RCE-EVAL"]
 
     def test_detects_eval(self):
         tree, lines = _parse("eval(user_input)")
@@ -33,16 +38,22 @@ class TestDynamicCodeExecutionRule:
         assert len(findings) == 1
         assert findings[0].sink == "exec"
 
-    def test_safe_code_no_finding(self):
+    def test_detects_compile(self):
+        tree, lines = _parse("compile(src, '<string>', 'exec')")
+        findings = self.rule.check(tree, lines, "test.py")
+        assert len(findings) == 1
+        assert findings[0].sink == "compile"
+
+    def test_safe_int_conversion_no_finding(self):
         tree, lines = _parse("x = int(user_input)")
         findings = self.rule.check(tree, lines, "test.py")
         assert findings == []
 
 
-# ── Command injection ─────────────────────────────────────────────────────────
+# ── CMD-INJECT ────────────────────────────────────────────────────────────────
 
-class TestCommandInjectionRule:
-    rule = CommandInjectionRule()
+class TestCmdInject:
+    rule = _RULES["CMD-INJECT"]
 
     def test_detects_tainted_os_system(self):
         src = """\
@@ -69,7 +80,6 @@ def run():
         assert len(findings) == 1
 
     def test_untainted_os_system_not_flagged(self):
-        """Bare os.system without a web source is not flagged (no noise)."""
         src = """\
 import os
 def backup():
@@ -79,7 +89,7 @@ def backup():
         findings = self.rule.check(tree, lines, "test.py")
         assert findings == []
 
-    def test_subprocess_shell_false_safe(self):
+    def test_subprocess_without_shell_not_flagged(self):
         src = """\
 import subprocess
 from flask import request
@@ -92,10 +102,10 @@ def run():
         assert findings == []
 
 
-# ── Import-time execution ─────────────────────────────────────────────────────
+# ── RCE-IMPORT ───────────────────────────────────────────────────────────────
 
-class TestImportTimeExecRule:
-    rule = ImportTimeExecRule()
+class TestRCEImport:
+    rule = _RULES["RCE-IMPORT"]
 
     def test_detects_eval_in_init(self):
         tree, lines = _parse("eval(dangerous)")
@@ -114,10 +124,10 @@ class TestImportTimeExecRule:
         assert any(f.sink == "system" for f in findings)
 
 
-# ── Build/install-time RCE ────────────────────────────────────────────────────
+# ── RCE-BUILD ─────────────────────────────────────────────────────────────────
 
-class TestBuildInstallRCERule:
-    rule = BuildInstallRCERule()
+class TestRCEBuild:
+    rule = _RULES["RCE-BUILD"]
 
     def test_detects_cmdclass(self):
         src = "from setuptools import setup\nsetup(name='x', cmdclass={'install': MyInstall})"
@@ -139,10 +149,10 @@ class TestBuildInstallRCERule:
         assert findings == []
 
 
-# ── Web input → sink flows ────────────────────────────────────────────────────
+# ── FLOW-WEB ──────────────────────────────────────────────────────────────────
 
-class TestWebInputFlowRule:
-    rule = WebInputFlowRule()
+class TestFlowWeb:
+    rule = _RULES["FLOW-WEB"]
 
     def test_detects_request_args_to_eval(self):
         src = """\
@@ -192,10 +202,10 @@ def view():
         assert any(f.sink == "eval" for f in findings)
 
 
-# ── Decorator-based execution ─────────────────────────────────────────────────
+# ── EXEC-DECORATOR ────────────────────────────────────────────────────────────
 
-class TestDecoratorExecutionRule:
-    rule = DecoratorExecutionRule()
+class TestExecDecorator:
+    rule = _RULES["EXEC-DECORATOR"]
 
     def test_detects_eval_decorator(self):
         src = """\
@@ -249,10 +259,10 @@ def handler():
         assert any("eval" in f.sink for f in findings)
 
 
-# ── Pickle over network socket ────────────────────────────────────────────────
+# ── PICKLE-NET ────────────────────────────────────────────────────────────────
 
-class TestPickleOverSocketRule:
-    rule = PickleOverSocketRule()
+class TestPickleNet:
+    rule = _RULES["PICKLE-NET"]
 
     def test_detects_pickle_loads_from_recv(self):
         src = """\

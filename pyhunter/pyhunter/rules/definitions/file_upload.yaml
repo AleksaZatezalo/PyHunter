@@ -1,0 +1,25 @@
+id: FILE-UPLOAD
+description: "File upload saved without extension/type validation — allows webshell upload leading to remote code execution"
+severity: CRITICAL
+phase: 1
+tags: [upload, rce, webshell]
+
+# Strategy: heuristic detection of file saves that lack validation.
+# Flags two patterns:
+#   1. file_obj.save(tainted_path)   — Flask FileStorage  (CRITICAL)
+#   2. open(tainted_path, "w...")    — Django / FastAPI   (HIGH)
+# Only fires when none of the safe_patterns appear in the surrounding
+# context_lines lines of source (no extension check, no secure_filename, …).
+strategy: save_heuristic
+save_heuristic:
+  sources: web_inputs
+  save_methods: [save]
+  write_functions: [open]
+  safe_patterns:
+    - splitext
+    - ".suffix"
+    - allowed_file
+    - secure_filename
+    - extension
+    - mimetype
+  context_lines: 15

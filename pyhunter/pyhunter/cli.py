@@ -287,6 +287,53 @@ def _build_markdown_report(
         lines.append("---")
         lines.append("")
 
+    # ── Taint Flow Summary ────────────────────────────────────────────────────
+    taint_findings = [f for f in findings if f.taint_path]
+    if taint_findings:
+        lines += ["## Taint Flow Summary", ""]
+        lines.append(
+            f"{len(taint_findings)} of {len(findings)} finding(s) have a "
+            f"recorded source→sink taint path.\n"
+        )
+
+        # Group by source type
+        from collections import defaultdict as _dd
+        by_source: dict = _dd(list)
+        for f in taint_findings:
+            by_source[f.source or "unknown"].append(f)
+
+        lines += ["| Source | Findings | Sanitized | Chains |", "|--------|----------|-----------|--------|"]
+        chain_finding_ids = {step.id for c in chains for step in c.steps}
+        for src, flist in sorted(by_source.items()):
+            san_count   = sum(1 for f in flist if f.sanitized)
+            chain_count = sum(1 for f in flist if f.id in chain_finding_ids)
+            san_str     = f"{san_count}/{len(flist)}" if san_count else "None"
+            chain_str   = str(chain_count) if chain_count else "—"
+            lines.append(f"| `{src}` | {len(flist)} | {san_str} | {chain_str} |")
+
+        lines += [""]
+
+        # Highlight unsanitized high-severity flows with chain membership
+        high_unsan = [
+            f for f in taint_findings
+            if not f.sanitized and f.severity.value in ("CRITICAL", "HIGH")
+        ]
+        if high_unsan:
+            lines += ["### High-Risk Unsanitized Flows", ""]
+            for f in high_unsan:
+                chain_ref = ""
+                for c in chains:
+                    if any(s.id == f.id for s in c.steps):
+                        chain_ref = f"  → part of **{c.id}**: {c.title}"
+                        break
+                lines.append(
+                    f"- **{f.id}** `{f.source or '?'}` → `{f.sink}`  "
+                    f"`{f.file}:{f.line}`{chain_ref}"
+                )
+            lines.append("")
+
+        lines += ["---", ""]
+
     if chains:
         lines += ["## Exploit Chains", ""]
         for c in chains:
@@ -340,6 +387,18 @@ def _write_structured_output(
         click.echo(f"  Markdown report written → {output}")
 
 
+def _format_taint_path(f: Finding) -> str:
+    """Return a human-readable taint path string for terminal display."""
+    if not f.taint_path:
+        return ""
+    san = f"  [sanitized by {f.sanitizer}]" if f.sanitized and f.sanitizer else ""
+    steps = "\n".join(
+        f"  {i}. L{step.location.line}  {step.variable:<18}  {step.description}"
+        for i, step in enumerate(f.taint_path.steps, 1)
+    )
+    return f"Source: {f.source or '?'}{san}\n{steps}"
+
+
 def _print_finding(f: Finding) -> None:
     sev   = f.severity.value
     color = _SEV_COLOR.get(sev, "white")
@@ -360,6 +419,10 @@ def _print_finding(f: Finding) -> None:
     click.echo()
 
     _box("Snippet",   f.snippet   or "—", dim=True)
+    if f.taint_path:
+        _box("Taint Path", _format_taint_path(f), dim=True)
+    if f.taint_analysis:
+        _box("Taint Analysis", f.taint_analysis.assessment)
     _box("Analysis",  f.analysis  or f.false_positive_reason or "—")
     _box("Explanation", f.explanation or "—")
     _box("PoC",       f.poc       or "—", fg="magenta")

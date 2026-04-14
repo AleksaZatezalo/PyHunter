@@ -1,0 +1,10 @@
+id: RCE-EVAL
+description: "Dynamic code execution via eval/exec/compile"
+severity: CRITICAL
+phase: 2
+tags: [rce, eval, exec]
+
+# Strategy: match bare function calls by name.
+strategy: call
+call:
+  functions: [eval, exec, compile]

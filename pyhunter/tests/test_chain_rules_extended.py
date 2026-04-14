@@ -1,5 +1,5 @@
 """
-Extended tests for RCE, cmd injection, and file upload rules.
+Extended tests for DESER-RCE, CMD-INJECT, and FILE-UPLOAD.
 
 Focuses on what test_chain_rules.py does NOT cover:
   - Tornado and DRF/Starlette request sources
@@ -10,21 +10,22 @@ Focuses on what test_chain_rules.py does NOT cover:
 """
 
 import ast
+
 import pytest
 
-from pyhunter.rules.deser_rce       import DeserRCERule
-from pyhunter.rules.cmd_injection   import CommandInjectionRule as CmdInjectRule
-from pyhunter.rules.file_upload_rce import FileUploadRCERule
+from pyhunter.rules.registry import all_rules
+
+_RULES = {r.rule_id: r for r in all_rules()}
 
 
 def _p(src: str):
     return ast.parse(src), src.splitlines()
 
 
-# ── Rule 02: DESER-RCE — extended ────────────────────────────────────────────
+# ── DESER-RCE — extended ──────────────────────────────────────────────────────
 
 class TestDeserRCEExtended:
-    r = DeserRCERule()
+    r = _RULES["DESER-RCE"]
 
     def test_dill_loads_with_request_data(self):
         src = """\
@@ -103,10 +104,10 @@ def load():
         assert f == []
 
 
-# ── Rule 03: CMD-INJECT — extended ───────────────────────────────────────────
+# ── CMD-INJECT — extended ─────────────────────────────────────────────────────
 
 class TestCmdInjectExtended:
-    r = CmdInjectRule()
+    r = _RULES["CMD-INJECT"]
 
     def test_os_popen_with_query_arg(self):
         src = """\
@@ -183,10 +184,10 @@ def get_uptime():
         assert f == []
 
 
-# ── Rule 05: FILE-UPLOAD-RCE — extended ──────────────────────────────────────
+# ── FILE-UPLOAD — extended ────────────────────────────────────────────────────
 
 class TestFileUploadRCEExtended:
-    r = FileUploadRCERule()
+    r = _RULES["FILE-UPLOAD"]
 
     def test_django_request_files_write(self):
         src = """\

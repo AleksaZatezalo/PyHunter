@@ -5,16 +5,11 @@ Design pattern: Chain of Responsibility (structural)
   two or more phases the Chainer treats them as a chain: each phase "enables"
   the next, and Claude narrates the end-to-end attack story.
 
-Attack phases for the current rule set
-───────────────────────────────────────
+Attack phases (declared per-rule in rules/definitions/*.yaml)
+─────────────────────────────────────────────────────────────
   1  Initial Access    — attacker-controlled input reaches vulnerable code
-                         FLOW-WEB, CMD-INJECT, DESER-RCE, FILE-UPLOAD, PICKLE-NET
-
   2  Code Execution    — the actual RCE mechanism triggered by that input
-                         RCE-EVAL, EXEC-DECORATOR
-
   3  Supply Chain      — persistence: code runs at build/install/import time
-                         RCE-BUILD, RCE-IMPORT
 
 Example chains
   Phase 1 + 2 : FLOW-WEB → RCE-EVAL  (web input reaches eval())
@@ -30,21 +25,26 @@ from pyhunter.models import ExploitChain, Finding
 from pyhunter.skills.chain import chain_skill
 
 # ── Phase mapping ─────────────────────────────────────────────────────────────
+# Derived lazily from the YAML rule definitions so the chainer never needs to
+# be updated when rules are added or removed.
 
-PHASE_MAP: Dict[str, int] = {
-    # Phase 1 — Initial Access
-    "FLOW-WEB":       1,
-    "CMD-INJECT":     1,
-    "DESER-RCE":      1,
-    "FILE-UPLOAD":    1,
-    "PICKLE-NET":     1,
-    # Phase 2 — Code Execution
-    "RCE-EVAL":       2,
-    "EXEC-DECORATOR": 2,
-    # Phase 3 — Supply Chain
-    "RCE-BUILD":      3,
-    "RCE-IMPORT":     3,
-}
+_PHASE_MAP_CACHE: Dict[str, int] | None = None
+
+
+def _build_phase_map() -> Dict[str, int]:
+    from pyhunter.rules.loader import load_all_rules   # local import avoids cycle
+    return {r.rule_id: r.phase for r in load_all_rules() if r.phase}
+
+
+def _get_phase_map() -> Dict[str, int]:
+    global _PHASE_MAP_CACHE
+    if _PHASE_MAP_CACHE is None:
+        _PHASE_MAP_CACHE = _build_phase_map()
+    return _PHASE_MAP_CACHE
+
+
+# Module-level alias kept for backward compatibility and convenience
+PHASE_MAP: Dict[str, int] = {}   # populated on first use via _get_phase_map()
 
 PHASE_NAMES: Dict[int, str] = {
     1: "Initial Access",
@@ -73,9 +73,10 @@ class Chainer:
         if len(exploitable) < 2:
             return []
 
+        phase_map = _get_phase_map()
         by_phase: Dict[int, List[Finding]] = defaultdict(list)
         for f in exploitable:
-            phase = PHASE_MAP.get(f.rule_id)
+            phase = phase_map.get(f.rule_id)
             if phase is not None:
                 by_phase[phase].append(f)
 

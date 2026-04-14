@@ -1,0 +1,27 @@
+id: FLOW-WEB
+description: "Web/CLI user input flowing into a dangerous sink"
+severity: CRITICAL
+phase: 1
+tags: [taint, web, rce]
+
+# Strategy: per-function intra-procedural taint flow.
+# check_any_arg: flag when *any* argument to the sink is tainted (catches
+# multi-hop flows that more specialised rules may miss).
+strategy: taint
+taint:
+  sources: web_inputs
+  check_any_arg: true
+  sinks:
+    # Bare calls (no module prefix)
+    - {function: eval}
+    - {function: exec}
+    - {function: compile}
+    - {function: open}
+    # Module-qualified calls
+    - {module: os,         function: system}
+    - {module: os,         function: popen}
+    - {module: subprocess, function: run}
+    - {module: subprocess, function: call}
+    - {module: subprocess, function: Popen}
+    - {module: pickle,     function: loads}
+    - {module: yaml,       function: load}

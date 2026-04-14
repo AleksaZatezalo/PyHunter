@@ -1,0 +1,28 @@
+id: CMD-INJECT
+description: "User input passed to an OS command executor — allows arbitrary shell command execution"
+severity: CRITICAL
+phase: 1
+tags: [injection, os, command]
+
+# Strategy: per-function taint flow, first-arg check.
+# require_shell_true: subprocess.* variants are only flagged when shell=True is
+# explicitly set; without it the list form is safe against shell injection.
+strategy: taint
+taint:
+  sources: web_inputs
+  sinks:
+    # Always dangerous regardless of shell flag
+    - {module: os,       function: system}
+    - {module: os,       function: popen}
+    - {module: os,       function: popen2}
+    - {module: os,       function: popen3}
+    - {module: os,       function: popen4}
+    - {module: pty,      function: spawn}
+    - {module: commands, function: getoutput}
+    - {module: commands, function: getstatusoutput}
+    # Only dangerous with shell=True
+    - {module: subprocess, function: run,          require_shell_true: true}
+    - {module: subprocess, function: call,         require_shell_true: true}
+    - {module: subprocess, function: check_call,   require_shell_true: true}
+    - {module: subprocess, function: check_output, require_shell_true: true}
+    - {module: subprocess, function: Popen,        require_shell_true: true}

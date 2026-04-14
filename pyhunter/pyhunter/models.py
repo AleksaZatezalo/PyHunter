@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
 
+from pyhunter.taint.types import TaintAnalysis, TaintPath
+
 
 class Severity(str, Enum):
     CRITICAL = "CRITICAL"
@@ -32,6 +34,12 @@ class Finding:
     sink:   Optional[str] = None
     source: Optional[str] = None
 
+    # Extended taint tracking (populated by CFGAnalyzer + taint skill)
+    taint_path:     Optional[TaintPath]     = None   # typed Layer 2 → Layer 3 contract
+    sanitized:      Optional[bool]          = None   # True when taint passed a sanitizer
+    sanitizer:      Optional[str]           = None   # sanitizer function name
+    taint_analysis: Optional[TaintAnalysis] = None   # typed Layer 3 → Layer 4 contract
+
     # LLM enrichment (populated by skills)
     exploitable:           Optional[bool]  = None
     confidence:            Optional[float] = None  # exploitability confidence [0.0–1.0]
@@ -55,6 +63,17 @@ class Finding:
             "snippet":               self.snippet,
             "sink":                  self.sink,
             "source":                self.source,
+            # taint_path serialised as legacy [{line, variable, description}, …] list
+            # so existing JSON consumers see no breaking change.
+            "taint_path":       (
+                self.taint_path.to_step_dicts() if self.taint_path else None
+            ),
+            "sanitized":        self.sanitized,
+            "sanitizer":        self.sanitizer,
+            # taint_assessment kept as the plain string for backward-compat consumers.
+            "taint_assessment": (
+                self.taint_analysis.assessment if self.taint_analysis else None
+            ),
             "exploitable":           self.exploitable,
             "confidence":            self.confidence,
             "false_positive_reason": self.false_positive_reason,
@@ -99,6 +118,28 @@ class Finding:
             lines += ["", f"**Reason**: {self.false_positive_reason}"]
         if self.analysis:
             lines += ["", self.analysis]
+
+        # ── Taint flow section ────────────────────────────────────────────────
+        if self.taint_path or self.taint_analysis:
+            lines += ["", "---", "", "## Taint Flow", ""]
+            san_status = (
+                f"**Sanitized**: Yes — `{self.sanitizer}`  _(bypass risk assessed below)_"
+                if self.sanitized and self.sanitizer
+                else ("**Sanitized**: Yes" if self.sanitized else "**Sanitized**: No — flow is unguarded")
+            )
+            lines.append(san_status)
+
+            if self.taint_path:
+                lines += ["", "**Propagation Path:**", ""]
+                for i, step in enumerate(self.taint_path.steps, 1):
+                    lines.append(
+                        f"{i}. Line {step.location.line} — "
+                        f"`{step.variable}` — {step.description}"
+                    )
+
+            if self.taint_analysis:
+                lines += ["", "### Taint Analysis", ""]
+                lines.append(self.taint_analysis.assessment)
 
         lines += ["", "---", "", "## Explanation", ""]
         lines.append(self.explanation or "_Not available._")
@@ -158,10 +199,15 @@ class ExploitChain:
             "",
         ]
         for i, step in enumerate(self.steps, 1):
+            taint_suffix = ""
+            if step.source:
+                taint_suffix = f" ← `{step.source}`"
+                if step.sanitized and step.sanitizer:
+                    taint_suffix += f" _(sanitized: {step.sanitizer})_"
             lines.append(
                 f"{i}. **{step.rule_id}** — "
                 f"`{step.file}:{step.line}` — "
-                f"`{step.sink or '?'}`"
+                f"`{step.sink or '?'}`{taint_suffix}"
             )
         lines += [
             "",

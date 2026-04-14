@@ -24,7 +24,7 @@ from pyhunter.config import load_config
 from pyhunter.engine.chainer import Chainer
 from pyhunter.models import ExploitChain, Finding
 from pyhunter.rules.registry import all_rules
-from pyhunter.taint import TaintEngine, TaintFlow
+from pyhunter.taint import CFGAnalyzer
 from pyhunter.skills.enrich import enrich
 
 # Max concurrent Claude API requests — stays well under rate limits
@@ -61,7 +61,7 @@ class Scanner:
         cfg              = load_config()
         disabled         = set(cfg.get("disabled_rules", []))
         self.rules       = [r for r in all_rules() if r.rule_id not in disabled]
-        self.taint       = TaintEngine()
+        self.cfg         = CFGAnalyzer()
         self.use_llm               = use_llm
         self.skip_false_positives  = skip_false_positives
         self.progress_callback     = progress_callback
@@ -98,27 +98,35 @@ class Scanner:
         for rule in self.rules:
             findings.extend(rule.check(tree, source_lines, str(filepath)))
 
-        flows = self.taint.analyze(tree, source_lines, str(filepath))
-        self._merge_taint(findings, flows)
+        self._annotate_taint(findings, tree, str(filepath))
         return findings
 
-    # ── Stage 3: taint merge ──────────────────────────────────────────────────
+    # ── Stage 3: targeted CFG taint annotation ────────────────────────────────
 
-    def _merge_taint(self, findings: List[Finding], flows: List[TaintFlow]) -> None:
-        """Annotate Finding.source using standalone taint-engine flows."""
-        index = {(f.sink, f.sink_line): f for f in flows}
+    def _annotate_taint(self, findings: List[Finding], tree: ast.AST, filepath: str) -> None:
+        """For each finding, run the CFG analyser on its enclosing function.
+
+        Populates Finding.taint_path (TaintPath), .source, .sanitized, .sanitizer
+        when a matching source-to-sink path is found.
+        """
         for finding in findings:
             if finding.sink is None or finding.source is not None:
                 continue
-            flow = index.get((finding.sink, finding.line))
-            if flow is None:
-                flow = next(
-                    (f for (s, l), f in index.items()
-                     if s == finding.sink and abs(l - finding.line) <= 5),
-                    None,
-                )
-            if flow:
-                finding.source = flow.source_expr
+            func_node = self.cfg.find_enclosing_function(tree, finding.line)
+            if func_node is None:
+                continue
+            paths = self.cfg.analyze_function(func_node, filepath, finding.rule_id)
+            # Match: same sink label and line within a small tolerance.
+            best = None
+            for path in paths:
+                if path.sink_label == finding.sink and abs(path.finding_line - finding.line) <= 3:
+                    best = path
+                    break
+            if best:
+                finding.taint_path = best
+                finding.source     = best.source_label
+                finding.sanitized  = best.sanitized if best.sanitized else None
+                finding.sanitizer  = best.sanitizer
 
     # ── Stages 4 + 5: async enrichment and chain analysis ────────────────────
 

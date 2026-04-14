@@ -1,0 +1,15 @@
+id: EXEC-DECORATOR
+description: "Dangerous or dynamic expression used as a decorator"
+severity: HIGH
+phase: 2
+tags: [decorator, rce, exec]
+
+# Strategy: inspect every decorator on every function/class definition.
+# Three sub-patterns:
+#   @eval              — bare dangerous name used as decorator  (HIGH)
+#   @eval(dynamic_arg) — dangerous name called with non-literal (HIGH)
+#   @app.route(var)    — web route with a non-literal path arg  (MEDIUM)
+strategy: decorator
+decorator:
+  dangerous_names: [eval, exec, run, call, apply, getattr, setattr]
+  route_names:     [route, get, post, put, delete, patch]

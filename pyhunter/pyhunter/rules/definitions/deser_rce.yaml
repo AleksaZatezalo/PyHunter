@@ -1,0 +1,27 @@
+id: DESER-RCE
+description: "Untrusted data passed to a deserialiser — pickle/YAML/jsonpickle/marshal/dill can execute arbitrary code on load"
+severity: CRITICAL
+phase: 1
+tags: [deserialization, pickle, yaml, rce]
+
+# Strategy: per-function taint + module-level direct-source check.
+# module_level_check: also flag module-scope calls where the first arg is
+#   directly a source expression (no function context needed).
+# yaml_unsafe_check: additionally flag yaml.load() calls that omit a safe
+#   Loader= kwarg (SafeLoader / BaseLoader / CSafeLoader).
+strategy: taint
+taint:
+  sources: web_inputs
+  module_level_check: true
+  yaml_unsafe_check: true
+  sinks:
+    - {module: pickle,     function: loads}
+    - {module: pickle,     function: load}
+    - {module: _pickle,    function: loads}
+    - {module: cPickle,    function: loads}
+    - {module: dill,       function: loads}
+    - {module: dill,       function: load}
+    - {module: jsonpickle, function: decode}
+    - {module: marshal,    function: loads}
+    - {module: marshal,    function: load}
+    - {module: shelve,     function: open}

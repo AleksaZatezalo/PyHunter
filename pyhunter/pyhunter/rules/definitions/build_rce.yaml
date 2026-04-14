@@ -1,0 +1,13 @@
+id: RCE-BUILD
+description: "Build-time RCE via dangerous setup() arguments"
+severity: HIGH
+phase: 3
+tags: [supply-chain, setup-py, build]
+
+# Strategy: file-scoped pattern matching.
+# Only runs on setup.py; flags setup() calls that pass dangerous kwargs
+# (cmdclass, ext_modules, distclass) which execute code at install time.
+strategy: file_scope
+file_scope:
+  filenames: [setup.py]
+  check_setup_kwargs: [cmdclass, ext_modules, distclass]
