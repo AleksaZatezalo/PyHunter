@@ -131,6 +131,24 @@ class Scanner:
     # ── Stages 4 + 5: async enrichment and chain analysis ────────────────────
 
     async def _enrich_and_chain(self, findings: List[Finding]) -> List[Finding]:
+        # Validate the API key once before launching concurrent tasks.
+        # This prevents per-finding silent failures when the key is absent —
+        # common when running under `sudo`, which strips environment variables.
+        from pyhunter.skills import _api_key
+        try:
+            _api_key()
+        except EnvironmentError as exc:
+            print(
+                f"\n  [!] {exc}\n"
+                "  LLM enrichment (PoC, demo, exploitation context) requires ANTHROPIC_API_KEY.\n"
+                "  If running with sudo, preserve the environment:\n"
+                "    sudo -E pyhunter scan ...\n"
+                "  Or pass the key explicitly:\n"
+                "    sudo env ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY pyhunter scan ...\n"
+                "  Returning raw AST findings without LLM enrichment.",
+                file=sys.stderr,
+            )
+            return findings
         enriched    = await self._enrich_all(findings)
         self.chains = await Chainer().build(enriched)
         return enriched

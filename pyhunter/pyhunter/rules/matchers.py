@@ -555,8 +555,15 @@ class DecoratorMatcher(Matcher):
                     rule, filepath, source_lines, dec.lineno,
                     f"@{name}(dynamic_arg)", severity=Severity.HIGH,
                 )
-            # @app.route(user_variable)
-            if name in self._routes and dec.args and self._is_dynamic(dec.args[0]):
+            # @app.route(user_variable) / @router.patch(dynamic_path)
+            # Require an explicit object receiver (@obj.method) so that bare
+            # @patch(MODULE_CONST) from unittest.mock is not flagged.
+            if (
+                name in self._routes
+                and isinstance(dec.func, ast.Attribute)
+                and dec.args
+                and self._is_dynamic(dec.args[0])
+            ):
                 return self._finding(
                     rule, filepath, source_lines, dec.lineno,
                     f"@{name}(dynamic_route)", severity=Severity.MEDIUM,
@@ -590,11 +597,23 @@ class FileScopeMatcher(Matcher):
         return False
 
     @staticmethod
-    def _call_name(call: ast.Call) -> str | None:
+    def _call_qualified_name(call: ast.Call) -> str | None:
+        """Return the fully-qualified call name used to match against danger_call_names.
+
+        Bare calls (``compile()``) return just the name (``"compile"``).
+        Attribute calls (``re.compile()``) return ``"module.func"``
+        (``"re.compile"``), so that caller-site module context is preserved
+        and ``danger_call_names: [compile]`` no longer false-positives on
+        ``re.compile()`` or ``base64.b64decode()``.
+        """
         if isinstance(call.func, ast.Name):
             return call.func.id
         if isinstance(call.func, ast.Attribute):
-            return call.func.attr
+            chain = _attr_chain(call.func)
+            if len(chain) >= 2:
+                return f"{chain[-2]}.{chain[-1]}"
+            if chain:
+                return chain[-1]
         return None
 
     def match(self, tree, source_lines, filepath, rule) -> List[Finding]:
@@ -627,10 +646,10 @@ class FileScopeMatcher(Matcher):
         for stmt in ast.iter_child_nodes(tree):
             for call in ast.walk(stmt):
                 if isinstance(call, ast.Call):
-                    name = self._call_name(call)
-                    if name in self._danger_calls:
+                    qname = self._call_qualified_name(call)
+                    if qname in self._danger_calls:
                         findings.append(
-                            self._finding(rule, filepath, source_lines, call.lineno, name)
+                            self._finding(rule, filepath, source_lines, call.lineno, qname)
                         )
         return findings
 

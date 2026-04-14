@@ -11,4 +11,7 @@ tags: [supply-chain, import, exec]
 strategy: file_scope
 file_scope:
   filenames: [__init__.py, setup.py]
-  danger_call_names: [eval, exec, compile, system, popen, Popen]
+  # Bare builtins are always suspicious at module scope.
+  # Module-qualified names prevent false positives from re.compile(),
+  # platform.system(), etc.
+  danger_call_names: [eval, exec, compile, os.system, os.popen, subprocess.Popen]
