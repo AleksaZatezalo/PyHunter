@@ -42,25 +42,29 @@ def cli():
 @click.option("--keep-fp", is_flag=True, help="Keep findings marked as false positives.")
 @click.option("--output-dir", "-o", type=click.Path(), default=None,
               help="Write output to this directory (report.md + exploit.py).")
-@click.option("--target-url", default=None, metavar="URL",
+@click.option("--target", "url", default=None, metavar="URL",
               help="Base URL of a running local instance (e.g. http://localhost:5000). "
                    "Activates the agentic exploit loop: Claude reads source files, "
                    "fires live requests, and iterates until RCE is confirmed.")
+@click.option("--command", default="echo PWNEDBYRESEARCHER",
+              type=click.Choice(["echo PWNEDBYRESEARCHER", "id", "whoami"]),
+              help="Safe OS command to execute as RCE proof (default: 'echo PWNEDBYRESEARCHER').")
 @click.option("--verbose", is_flag=True, help="Show snippet in enrichment progress.")
-def scan(target, no_llm, keep_fp, output_dir, target_url, verbose):
+def scan(target, no_llm, keep_fp, output_dir, url, command, verbose):
     """Scan TARGET (file or directory) for vulnerabilities."""
     _banner()
     _kv("Target", target)
     _kv("Mode",   "AST only" if no_llm else "AST + Claude enrichment")
-    if target_url:
+    if url:
         if no_llm:
             click.secho(
-                "  Note: --target-url has no effect with --no-llm. "
+                "  Note: --target has no effect with --no-llm. "
                 "Re-run without --no-llm to enable the agentic exploit loop.",
                 fg="yellow",
             )
         else:
-            _kv("Agent target", target_url)
+            _kv("Agent target", url)
+            _kv("Command",      command)
     _rule()
 
     scanner  = Scanner(use_llm=not no_llm, skip_false_positives=not keep_fp)
@@ -71,7 +75,8 @@ def scan(target, no_llm, keep_fp, output_dir, target_url, verbose):
         chains=scanner.chains,
         target=target,
         use_llm=not no_llm,
-        target_url=target_url if not no_llm else None,
+        target_url=url if not no_llm else None,
+        command=command,
     )
 
 
@@ -245,10 +250,11 @@ def _print_results(
     target: str = "",
     use_llm: bool = True,
     target_url: Optional[str] = None,
+    command: str = "echo PWNEDBYRESEARCHER",
 ) -> None:
     # Write output directory first — always write even when findings list is empty.
     if output_dir:
-        _write_output_dir(findings, chains or [], target, output_dir, use_llm, target_url)
+        _write_output_dir(findings, chains or [], target, output_dir, use_llm, target_url, command)
 
     if not findings:
         click.echo()
@@ -368,6 +374,7 @@ def _write_output_dir(
     output_dir: str,
     use_llm: bool,
     target_url: Optional[str] = None,
+    command: str = "echo PWNEDBYRESEARCHER",
 ) -> None:
     """Write report.md and exploit.py to output_dir."""
     import asyncio
@@ -388,23 +395,21 @@ def _write_output_dir(
             f"  Starting agentic exploit loop against {target_url} …",
             bold=True, fg="bright_red",
         )
+        click.echo(f"  Command: {command}")
 
         def _on_tool(tool_name: str, tool_input: dict) -> None:
             icons = {"read_file": "read", "http_request": "http", "run_script": "exec"}
             icon  = icons.get(tool_name, tool_name)
-            detail = (
-                tool_input.get("path")
-                or tool_input.get("path", tool_input.get("method", "") + " " + tool_input.get("path", ""))
-                or str(tool_input)[:60]
-            )
             if tool_name == "http_request":
                 detail = f"{tool_input.get('method','?')} {tool_input.get('path','')}"
             elif tool_name == "run_script":
                 detail = tool_input.get("code", "")[:60].replace("\n", " ")
+            else:
+                detail = tool_input.get("path") or str(tool_input)[:60]
             click.echo(f"  [{icon}] {detail}")
 
         exploit_code = asyncio.run(
-            agent_exploit(findings, chains, target, target_url, progress_cb=_on_tool)
+            agent_exploit(findings, chains, target, target_url, command=command, progress_cb=_on_tool)
         )
     elif use_llm:
         click.secho("  Generating exploit PoC …", bold=True)
