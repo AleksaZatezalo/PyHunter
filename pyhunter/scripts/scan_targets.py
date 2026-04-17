@@ -137,14 +137,13 @@ class PyHunterRunner:
         if target.source_dir is None:
             raise ValueError(f"source_dir not set for {target.name} - acquire first")
 
-        out_file = self.config.output_dir / f"{target.name}.json"
+        out_dir = self.config.output_dir / target.name
 
         cmd = [
             self.config.pyhunter_bin,
             "scan",
             str(target.source_dir),
-            "--output", str(out_file),
-            "--format", "json",
+            "--output-dir", str(out_dir),
         ]
 
         log.info(f"[{target.name}] Running: {' '.join(cmd)}")
@@ -170,14 +169,18 @@ class PyHunterRunner:
             log.warning(f"[{target.name}] pyhunter exited {result.returncode}")
             log.debug(result.stderr)
 
-        if out_file.exists():
-            with open(out_file) as f:
-                scan_result = json.load(f)
-        else:
-            scan_result = {"raw_output": result.stdout, "stderr": result.stderr}
+        scan_result: dict = {"output_dir": str(out_dir)}
+        report_path = out_dir / "report.md"
+        exploit_path = out_dir / "exploit.py"
+        if report_path.exists():
+            scan_result["report"] = str(report_path)
+        if exploit_path.exists():
+            scan_result["exploit"] = str(exploit_path)
+        if result.returncode not in (0, 1):
+            scan_result["stderr"] = result.stderr
 
         target.scan_result = scan_result
-        log.info(f"[{target.name}] Scan complete - results at {out_file}")
+        log.info(f"[{target.name}] Scan complete - results at {out_dir}/")
         return scan_result
 
 
@@ -196,7 +199,7 @@ class ResultsWriter:
             pkg.name: {
                 "version": pkg.version,
                 "source_dir": str(pkg.source_dir),
-                "findings": pkg.scan_result,
+                "scan_result": pkg.scan_result,
             }
             for pkg in targets
         }
@@ -300,10 +303,14 @@ def main() -> None:
     print("SCAN SUMMARY")
     print("=" * 60)
     for t in targets:
-        status = "ERROR" if (t.scan_result or {}).get("error") else "OK"
+        result = t.scan_result or {}
+        status = "ERROR" if result.get("error") else "OK"
         version = t.version or "unknown"
-        finding_count = len(t.scan_result) if isinstance(t.scan_result, list) else "?"
-        print(f"  {t.name:<20} v{version:<12} [{status}]  findings: {finding_count}")
+        report = result.get("report", "—")
+        exploit = result.get("exploit", "—")
+        print(f"  {t.name:<20} v{version:<12} [{status}]")
+        print(f"    report:  {report}")
+        print(f"    exploit: {exploit}")
     print("=" * 60)
     print(f"Full results: {config.output_dir}/\n")
 

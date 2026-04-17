@@ -40,21 +40,39 @@ def cli():
 @click.argument("target", type=click.Path(exists=True))
 @click.option("--no-llm",  is_flag=True, help="AST rules only, skip Claude enrichment.")
 @click.option("--keep-fp", is_flag=True, help="Keep findings marked as false positives.")
-@click.option("--output", "-o", type=click.Path(), default=None,
-              help="Write output to this file path (markdown by default; use --format to override).")
-@click.option("--format", "fmt", type=click.Choice(["json", "text", "markdown"]), default=None,
-              help="Output format: markdown (default), json (machine-readable), or text (plain).")
+@click.option("--output-dir", "-o", type=click.Path(), default=None,
+              help="Write output to this directory (report.md + exploit.py).")
+@click.option("--target-url", default=None, metavar="URL",
+              help="Base URL of a running local instance (e.g. http://localhost:5000). "
+                   "Activates the agentic exploit loop: Claude reads source files, "
+                   "fires live requests, and iterates until RCE is confirmed.")
 @click.option("--verbose", is_flag=True, help="Show snippet in enrichment progress.")
-def scan(target, no_llm, keep_fp, output, fmt, verbose):
+def scan(target, no_llm, keep_fp, output_dir, target_url, verbose):
     """Scan TARGET (file or directory) for vulnerabilities."""
     _banner()
     _kv("Target", target)
     _kv("Mode",   "AST only" if no_llm else "AST + Claude enrichment")
+    if target_url:
+        if no_llm:
+            click.secho(
+                "  Note: --target-url has no effect with --no-llm. "
+                "Re-run without --no-llm to enable the agentic exploit loop.",
+                fg="yellow",
+            )
+        else:
+            _kv("Agent target", target_url)
     _rule()
 
     scanner  = Scanner(use_llm=not no_llm, skip_false_positives=not keep_fp)
     findings = _run_scan(scanner, target, use_llm=not no_llm)
-    _print_results(findings, output, fmt=fmt, chains=scanner.chains, target=target)
+    _print_results(
+        findings,
+        output_dir=output_dir,
+        chains=scanner.chains,
+        target=target,
+        use_llm=not no_llm,
+        target_url=target_url if not no_llm else None,
+    )
 
 
 @cli.command()
@@ -222,17 +240,15 @@ def _print_enriched_line(result: Optional[Finding], done: int, total: int) -> No
 
 def _print_results(
     findings: List[Finding],
-    output: Optional[str],
-    fmt: Optional[str] = None,
+    output_dir: Optional[str] = None,
     chains: Optional[List[ExploitChain]] = None,
     target: str = "",
+    use_llm: bool = True,
+    target_url: Optional[str] = None,
 ) -> None:
-    # Resolve effective format: default to markdown when --output given without --format.
-    effective_fmt = fmt or ("markdown" if output else None)
-
-    # Write structured output first — always write even when findings list is empty.
-    if output and effective_fmt:
-        _write_structured_output(findings, output, effective_fmt, chains=chains or [], target=target)
+    # Write output directory first — always write even when findings list is empty.
+    if output_dir:
+        _write_output_dir(findings, chains or [], target, output_dir, use_llm, target_url)
 
     if not findings:
         click.echo()
@@ -343,6 +359,61 @@ def _build_markdown_report(
             lines.append("")
 
     return "\n".join(lines)
+
+
+def _write_output_dir(
+    findings: List[Finding],
+    chains: List[ExploitChain],
+    target: str,
+    output_dir: str,
+    use_llm: bool,
+    target_url: Optional[str] = None,
+) -> None:
+    """Write report.md and exploit.py to output_dir."""
+    import asyncio
+    from pyhunter.skills.exploit_gen import generate_exploit, no_exploit_placeholder
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    report_path = out / "report.md"
+    report_path.write_text(_build_markdown_report(findings, chains, target=target))
+    click.echo(f"\n  Report  → {report_path}")
+
+    exploit_path = out / "exploit.py"
+    if use_llm and target_url:
+        from pyhunter.skills.agent_exploit import agent_exploit
+
+        click.secho(
+            f"  Starting agentic exploit loop against {target_url} …",
+            bold=True, fg="bright_red",
+        )
+
+        def _on_tool(tool_name: str, tool_input: dict) -> None:
+            icons = {"read_file": "read", "http_request": "http", "run_script": "exec"}
+            icon  = icons.get(tool_name, tool_name)
+            detail = (
+                tool_input.get("path")
+                or tool_input.get("path", tool_input.get("method", "") + " " + tool_input.get("path", ""))
+                or str(tool_input)[:60]
+            )
+            if tool_name == "http_request":
+                detail = f"{tool_input.get('method','?')} {tool_input.get('path','')}"
+            elif tool_name == "run_script":
+                detail = tool_input.get("code", "")[:60].replace("\n", " ")
+            click.echo(f"  [{icon}] {detail}")
+
+        exploit_code = asyncio.run(
+            agent_exploit(findings, chains, target, target_url, progress_cb=_on_tool)
+        )
+    elif use_llm:
+        click.secho("  Generating exploit PoC …", bold=True)
+        exploit_code = asyncio.run(generate_exploit(findings, chains, target))
+    else:
+        exploit_code = no_exploit_placeholder(target)
+
+    exploit_path.write_text(exploit_code)
+    click.echo(f"  Exploit → {exploit_path}\n")
 
 
 def _write_structured_output(
